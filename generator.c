@@ -90,7 +90,7 @@ extern int max_delete;
 extern int force_delete;
 extern int one_file_system;
 extern int skipped_deletes;
-extern dev_t filesystem_dev;
+extern DEV_T filesystem_dev;
 extern mode_t orig_umask;
 extern uid_t our_uid;
 extern char *tmpdir;
@@ -100,7 +100,7 @@ extern filter_rule_list filter_list, daemon_filter_list;
 
 int maybe_ATTRS_REPORT = 0;
 
-static dev_t dev_zero;
+static DEV_T dev_zero;
 static int deldelay_size = 0, deldelay_cnt = 0;
 static char *deldelay_buf = NULL;
 static int deldelay_fd = -1;
@@ -272,7 +272,7 @@ static void do_delayed_deletions(char *delbuf)
  * MAXPATHLEN buffer with the name of the directory in it (the functions we
  * call will append names onto the end, but the old dir value will be restored
  * on exit). */
-static void delete_in_dir(char *fbuf, struct file_struct *file, dev_t *fs_dev)
+static void delete_in_dir(char *fbuf, struct file_struct *file, DEV_T *fs_dev)
 {
 	static int already_warned = 0;
 	struct file_list *dirlist;
@@ -1563,7 +1563,7 @@ static void recv_generator(char *fname, struct file_struct *file, int ndx,
 
 	if ((am_root && preserve_devices && IS_DEVICE(file->mode))
 	 || (preserve_specials && IS_SPECIAL(file->mode))) {
-		dev_t rdev;
+		DEV_T rdev;
 		int del_for_flag = 0;
 		if (IS_DEVICE(file->mode)) {
 			uint32 *devp = F_RDEV_P(file);
@@ -2230,7 +2230,7 @@ void generate_files(int f_out, const char *local_name)
 			if (delete_during && dry_run < 2 && !list_only
 			 && !(fp->flags & FLAG_MISSING_DIR)) {
 				if (fp->flags & FLAG_CONTENT_DIR) {
-					dev_t dirdev;
+					DEV_T dirdev;
 					if (one_file_system) {
 						uint32 *devp = F_DIR_DEV_P(fp);
 						dirdev = MAKEDEV(DEV_MAJOR(devp), DEV_MINOR(devp));
