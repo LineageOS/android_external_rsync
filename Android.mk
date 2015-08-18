@@ -11,12 +11,14 @@ LOCAL_SRC_FILES := \
 	sender.c \
 	exclude.c \
 	util.c \
+	util2.c \
 	main.c \
 	checksum.c \
 	match.c \
 	syscall.c \
 	log.c \
 	backup.c \
+	delete.c \
 	options.c \
 	io.c \
 	compat.c \
@@ -41,6 +43,7 @@ LOCAL_SRC_FILES := \
 	authenticate.c \
 	lib/wildmatch.c \
 	lib/compat.c \
+	lib/getpass.c \
 	lib/snprintf.c \
 	lib/mdfour.c \
 	lib/md5.c \
@@ -66,7 +69,7 @@ LOCAL_SRC_FILES := \
 	popt/popthelp.c \
 	popt/poptparse.c
 
-LOCAL_C_INCLUDES := $(LOCAL_PATH)/popt
+LOCAL_C_INCLUDES := $(LOCAL_PATH)/popt $(LOCAL_PATH)/zlib
 
 LOCAL_CFLAGS := -DHAVE_CONFIG_H
 
