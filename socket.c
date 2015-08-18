@@ -3,7 +3,7 @@
  *
  * Copyright (C) 1992-2001 Andrew Tridgell <tridge@samba.org>
  * Copyright (C) 2001, 2002 Martin Pool <mbp@samba.org>
- * Copyright (C) 2003-2009 Wayne Davison
+ * Copyright (C) 2003-2014 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -25,9 +25,13 @@
  * emulate it using the KAME implementation. */
 
 #include "rsync.h"
-#include "ifuncs.h"
+#include "itypes.h"
+#ifdef HAVE_NETINET_IN_SYSTM_H
 #include <netinet/in_systm.h>
+#endif
+#ifdef HAVE_NETINET_IP_H
 #include <netinet/ip.h>
+#endif
 #include <netinet/tcp.h>
 
 extern char *bind_address;
@@ -182,7 +186,7 @@ int open_socket_out(char *host, int port, const char *bind_addr,
 		    int af_hint)
 {
 	int type = SOCK_STREAM;
-	int error, s;
+	int error, s, j, addr_cnt, *errnos;
 	struct addrinfo hints, *res0, *res;
 	char portbuf[10];
 	char *h, *cp;
@@ -225,7 +229,7 @@ int open_socket_out(char *host, int port, const char *bind_addr,
 		}
 		*cp++ = '\0';
 		strlcpy(portbuf, cp, sizeof portbuf);
-		if (verbose >= 2) {
+		if (DEBUG_GTE(CONNECT, 1)) {
 			rprintf(FINFO, "connection via http proxy %s port %s\n",
 				h, portbuf);
 		}
@@ -244,12 +248,17 @@ int open_socket_out(char *host, int port, const char *bind_addr,
 		return -1;
 	}
 
+	for (res = res0, addr_cnt = 0; res; res = res->ai_next, addr_cnt++) {}
+	errnos = new_array0(int, addr_cnt);
+	if (!errnos)
+		out_of_memory("open_socket_out");
+
 	s = -1;
 	/* Try to connect to all addresses for this machine until we get
 	 * through.  It might e.g. be multi-homed, or have both IPv4 and IPv6
 	 * addresses.  We need to create a socket for each record, since the
 	 * address record tells us what protocol to use to try to connect. */
-	for (res = res0; res; res = res->ai_next) {
+	for (res = res0, j = 0; res; res = res->ai_next, j++) {
 		s = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
 		if (s < 0)
 			continue;
@@ -280,8 +289,10 @@ int open_socket_out(char *host, int port, const char *bind_addr,
 		if (connect_timeout > 0)
 			alarm(0);
 
-		if (s < 0)
+		if (s < 0) {
+			errnos[j] = errno;
 			continue;
+		}
 
 		if (proxied
 		 && establish_proxy_connection(s, host, port,
@@ -290,13 +301,31 @@ int open_socket_out(char *host, int port, const char *bind_addr,
 			s = -1;
 			continue;
 		}
+		if (DEBUG_GTE(CONNECT, 2)) {
+			char buf[2048];
+			if ((error = getnameinfo(res->ai_addr, res->ai_addrlen, buf, sizeof buf, NULL, 0, NI_NUMERICHOST)) != 0)
+				snprintf(buf, sizeof buf, "*getnameinfo failure: %s*", gai_strerror(error));
+			rprintf(FINFO, "Connected to %s (%s)\n", h, buf);
+		}
 		break;
 	}
-	freeaddrinfo(res0);
-	if (s < 0) {
-		rsyserr(FERROR, errno, "failed to connect to %s", h);
-		return -1;
+
+	if (s < 0 || DEBUG_GTE(CONNECT, 2)) {
+		char buf[2048];
+		for (res = res0, j = 0; res; res = res->ai_next, j++) {
+			if (errnos[j] == 0)
+				continue;
+			if ((error = getnameinfo(res->ai_addr, res->ai_addrlen, buf, sizeof buf, NULL, 0, NI_NUMERICHOST)) != 0)
+				snprintf(buf, sizeof buf, "*getnameinfo failure: %s*", gai_strerror(error));
+			rsyserr(FERROR, errnos[j], "failed to connect to %s (%s)", h, buf);
+		}
+		if (s < 0)
+			s = -1;
 	}
+
+	freeaddrinfo(res0);
+	free(errnos);
+
 	return s;
 }
 
@@ -352,7 +381,7 @@ int open_socket_out_wrapped(char *host, int port, const char *bind_addr,
 		*t = '\0';
 	}
 
-	if (verbose >= 2) {
+	if (DEBUG_GTE(CONNECT, 1)) {
 		rprintf(FINFO, "%sopening tcp connection to %s port %d\n",
 			prog ? "Using RSYNC_CONNECT_PROG instead of " : "",
 			host, port);
@@ -460,7 +489,7 @@ static int *open_socket_in(int type, int port, const char *bind_addr,
 	/* Only output the socket()/bind() messages if we were totally
 	 * unsuccessful, or if the daemon is being run with -vv. */
 	for (s = 0; s < ecnt; s++) {
-		if (!i || verbose > 1)
+		if (!i || DEBUG_GTE(BIND, 1))
 			rwrite(FLOG, errmsgs[s], strlen(errmsgs[s]), 0);
 		free(errmsgs[s]);
 	}
@@ -528,7 +557,7 @@ void start_accept_loop(int port, int (*fn)(int, int))
 	/* ready to listen */
 	FD_ZERO(&deffds);
 	for (i = 0, maxfd = -1; sp[i] >= 0; i++) {
-		if (listen(sp[i], 5) < 0) {
+		if (listen(sp[i], lp_listen_backlog()) < 0) {
 			rsyserr(FERROR, errno, "listen() on socket failed");
 #ifdef INET6
 			if (errno == EADDRINUSE && i > 0) {
@@ -617,7 +646,9 @@ struct
 } socket_options[] = {
   {"SO_KEEPALIVE",      SOL_SOCKET,    SO_KEEPALIVE,    0,                 OPT_BOOL},
   {"SO_REUSEADDR",      SOL_SOCKET,    SO_REUSEADDR,    0,                 OPT_BOOL},
+#ifdef SO_BROADCAST
   {"SO_BROADCAST",      SOL_SOCKET,    SO_BROADCAST,    0,                 OPT_BOOL},
+#endif
 #ifdef TCP_NODELAY
   {"TCP_NODELAY",       IPPROTO_TCP,   TCP_NODELAY,     0,                 OPT_BOOL},
 #endif
@@ -800,7 +831,7 @@ static int sock_exec(const char *prog)
 		rsyserr(FERROR, errno, "socketpair_tcp failed");
 		return -1;
 	}
-	if (verbose >= 2)
+	if (DEBUG_GTE(CMD, 1))
 		rprintf(FINFO, "Running socket program: \"%s\"\n", prog);
 
 	pid = fork();

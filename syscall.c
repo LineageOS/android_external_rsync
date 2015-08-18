@@ -4,7 +4,7 @@
  *
  * Copyright (C) 1998 Andrew Tridgell
  * Copyright (C) 2002 Martin Pool
- * Copyright (C) 2003-2009 Wayne Davison
+ * Copyright (C) 2003-2014 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -29,8 +29,13 @@
 #include <sys/attr.h>
 #endif
 
+#if defined HAVE_SYS_FALLOCATE && !defined HAVE_FALLOCATE
+#include <sys/syscall.h>
+#endif
+
 extern int dry_run;
 extern int am_root;
+extern int am_sender;
 extern int read_only;
 extern int list_only;
 extern int preserve_perms;
@@ -53,12 +58,54 @@ int do_unlink(const char *fname)
 	return unlink(fname);
 }
 
-int do_symlink(const char *fname1, const char *fname2)
+#ifdef SUPPORT_LINKS
+int do_symlink(const char *lnk, const char *fname)
 {
 	if (dry_run) return 0;
 	RETURN_ERROR_IF_RO_OR_LO;
-	return symlink(fname1, fname2);
+
+#if defined NO_SYMLINK_XATTRS || defined NO_SYMLINK_USER_XATTRS
+	/* For --fake-super, we create a normal file with mode 0600
+	 * and write the lnk into it. */
+	if (am_root < 0) {
+		int ok, len = strlen(lnk);
+		int fd = open(fname, O_WRONLY|O_CREAT|O_TRUNC, S_IWUSR|S_IRUSR);
+		if (fd < 0)
+			return -1;
+		ok = write(fd, lnk, len) == len;
+		if (close(fd) < 0)
+			ok = 0;
+		return ok ? 0 : -1;
+	}
+#endif
+
+	return symlink(lnk, fname);
 }
+
+#if defined NO_SYMLINK_XATTRS || defined NO_SYMLINK_USER_XATTRS
+ssize_t do_readlink(const char *path, char *buf, size_t bufsiz)
+{
+	/* For --fake-super, we read the link from the file. */
+	if (am_root < 0) {
+		int fd = do_open_nofollow(path, O_RDONLY);
+		if (fd >= 0) {
+			int len = read(fd, buf, bufsiz);
+			close(fd);
+			return len;
+		}
+		if (errno != ELOOP)
+			return -1;
+		/* A real symlink needs to be turned into a fake one on the receiving
+		 * side, so tell the generator that the link has no length. */
+		if (!am_sender)
+			return 0;
+		/* Otherwise fall through and let the sender report the real length. */
+	}
+
+	return readlink(path, buf, bufsiz);
+}
+#endif
+#endif
 
 #ifdef HAVE_LINK
 int do_link(const char *fname1, const char *fname2)
@@ -100,13 +147,13 @@ int do_mknod(const char *pathname, mode_t mode, DEV_T dev)
 	if (S_ISSOCK(mode)) {
 		int sock;
 		struct sockaddr_un saddr;
+		unsigned int len = strlcpy(saddr.sun_path, pathname, sizeof saddr.sun_path);
+		if (len >= sizeof saddr.sun_path) {
+			errno = ENAMETOOLONG;
+			return -1;
+		}
 #ifdef HAVE_SOCKADDR_UN_LEN
-		unsigned int len =
-#endif
-		    strlcpy(saddr.sun_path, pathname, sizeof saddr.sun_path);
-#ifdef HAVE_SOCKADDR_UN_LEN
-		saddr.sun_len = len >= sizeof saddr.sun_path
-			      ? sizeof saddr.sun_path : len + 1;
+		saddr.sun_len = len + 1;
 #endif
 		saddr.sun_family = AF_UNIX;
 
@@ -182,6 +229,22 @@ int do_rename(const char *fname1, const char *fname2)
 	RETURN_ERROR_IF_RO_OR_LO;
 	return rename(fname1, fname2);
 }
+
+#ifdef HAVE_FTRUNCATE
+int do_ftruncate(int fd, OFF_T size)
+{
+	int ret;
+
+	if (dry_run) return 0;
+	RETURN_ERROR_IF_RO_OR_LO;
+
+	do {
+		ret = ftruncate(fd, size);
+	} while (ret < 0 && errno == EINTR);
+
+	return ret;
+}
+#endif
 
 void trim_trailing_slashes(char *name)
 {
@@ -283,4 +346,146 @@ OFF_T do_lseek(int fd, OFF_T offset, int whence)
 #else
 	return lseek(fd, offset, whence);
 #endif
+}
+
+#ifdef HAVE_UTIMENSAT
+int do_utimensat(const char *fname, time_t modtime, uint32 mod_nsec)
+{
+	struct timespec t[2];
+
+	if (dry_run) return 0;
+	RETURN_ERROR_IF_RO_OR_LO;
+
+	t[0].tv_sec = 0;
+	t[0].tv_nsec = UTIME_NOW;
+	t[1].tv_sec = modtime;
+	t[1].tv_nsec = mod_nsec;
+	return utimensat(AT_FDCWD, fname, t, AT_SYMLINK_NOFOLLOW);
+}
+#endif
+
+#ifdef HAVE_LUTIMES
+int do_lutimes(const char *fname, time_t modtime, uint32 mod_nsec)
+{
+	struct timeval t[2];
+
+	if (dry_run) return 0;
+	RETURN_ERROR_IF_RO_OR_LO;
+
+	t[0].tv_sec = time(NULL);
+	t[0].tv_usec = 0;
+	t[1].tv_sec = modtime;
+	t[1].tv_usec = mod_nsec / 1000;
+	return lutimes(fname, t);
+}
+#endif
+
+#ifdef HAVE_UTIMES
+int do_utimes(const char *fname, time_t modtime, uint32 mod_nsec)
+{
+	struct timeval t[2];
+
+	if (dry_run) return 0;
+	RETURN_ERROR_IF_RO_OR_LO;
+
+	t[0].tv_sec = time(NULL);
+	t[0].tv_usec = 0;
+	t[1].tv_sec = modtime;
+	t[1].tv_usec = mod_nsec / 1000;
+	return utimes(fname, t);
+}
+
+#elif defined HAVE_UTIME
+int do_utime(const char *fname, time_t modtime, UNUSED(uint32 mod_nsec))
+{
+#ifdef HAVE_STRUCT_UTIMBUF
+	struct utimbuf tbuf;
+#else
+	time_t t[2];
+#endif
+
+	if (dry_run) return 0;
+	RETURN_ERROR_IF_RO_OR_LO;
+
+# ifdef HAVE_STRUCT_UTIMBUF
+	tbuf.actime = time(NULL);
+	tbuf.modtime = modtime;
+	return utime(fname, &tbuf);
+# else
+	t[0] = time(NULL);
+	t[1] = modtime;
+	return utime(fname, t);
+# endif
+}
+
+#else
+#error Need utimes or utime function.
+#endif
+
+#ifdef SUPPORT_PREALLOCATION
+int do_fallocate(int fd, OFF_T offset, OFF_T length)
+{
+#ifdef FALLOC_FL_KEEP_SIZE
+#define DO_FALLOC_OPTIONS FALLOC_FL_KEEP_SIZE
+#else
+#define DO_FALLOC_OPTIONS 0
+#endif
+	RETURN_ERROR_IF(dry_run, 0);
+	RETURN_ERROR_IF_RO_OR_LO;
+#if defined HAVE_FALLOCATE
+	return fallocate(fd, DO_FALLOC_OPTIONS, offset, length);
+#elif defined HAVE_SYS_FALLOCATE
+	return syscall(SYS_fallocate, fd, DO_FALLOC_OPTIONS, (loff_t)offset, (loff_t)length);
+#elif defined HAVE_EFFICIENT_POSIX_FALLOCATE
+	return posix_fallocate(fd, offset, length);
+#else
+#error Coding error in SUPPORT_PREALLOCATION logic.
+#endif
+}
+#endif
+
+int do_open_nofollow(const char *pathname, int flags)
+{
+#ifndef O_NOFOLLOW
+	STRUCT_STAT f_st, l_st;
+#endif
+	int fd;
+
+	if (flags != O_RDONLY) {
+		RETURN_ERROR_IF(dry_run, 0);
+		RETURN_ERROR_IF_RO_OR_LO;
+#ifndef O_NOFOLLOW
+		/* This function doesn't support write attempts w/o O_NOFOLLOW. */
+		errno = EINVAL;
+		return -1;
+#endif
+	}
+
+#ifdef O_NOFOLLOW
+	fd = open(pathname, flags|O_NOFOLLOW);
+#else
+	if (do_lstat(pathname, &l_st) < 0)
+		return -1;
+	if (S_ISLNK(l_st.st_mode)) {
+		errno = ELOOP;
+		return -1;
+	}
+	if ((fd = open(pathname, flags)) < 0)
+		return fd;
+	if (do_fstat(fd, &f_st) < 0) {
+	  close_and_return_error:
+		{
+			int save_errno = errno;
+			close(fd);
+			errno = save_errno;
+		}
+		return -1;
+	}
+	if (l_st.st_dev != f_st.st_dev || l_st.st_ino != f_st.st_ino) {
+		errno = EINVAL;
+		goto close_and_return_error;
+	}
+#endif
+
+	return fd;
 }

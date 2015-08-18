@@ -3,7 +3,7 @@
  *
  * Copyright (C) 1996 Andrew Tridgell
  * Copyright (C) 1996 Paul Mackerras
- * Copyright (C) 2004-2009 Wayne Davison
+ * Copyright (C) 2004-2014 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -98,10 +98,10 @@ void get_checksum2(char *buf, int32 len, char *sum)
 	}
 }
 
-void file_checksum(char *fname, char *sum, OFF_T size)
+void file_checksum(const char *fname, const STRUCT_STAT *st_p, char *sum)
 {
 	struct map_struct *buf;
-	OFF_T i, len = size;
+	OFF_T i, len = st_p->st_size;
 	md_context m;
 	int32 remainder;
 	int fd;
@@ -112,7 +112,7 @@ void file_checksum(char *fname, char *sum, OFF_T size)
 	if (fd == -1)
 		return;
 
-	buf = map_file(fd, size, MAX_MAP_SIZE, CSUM_CHUNK);
+	buf = map_file(fd, len, MAX_MAP_SIZE, CSUM_CHUNK);
 
 	if (protocol_version >= 30) {
 		md5_begin(&m);

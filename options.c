@@ -3,7 +3,7 @@
  *
  * Copyright (C) 1998-2001 Andrew Tridgell <tridge@samba.org>
  * Copyright (C) 2000, 2001, 2002 Martin Pool <mbp@samba.org>
- * Copyright (C) 2002-2010 Wayne Davison
+ * Copyright (C) 2002-2014 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,17 +20,19 @@
  */
 
 #include "rsync.h"
-#include "ifuncs.h"
+#include "itypes.h"
 #include <popt.h>
-#include "zlib/zlib.h"
+#include <zlib.h>
 
 extern int module_id;
 extern int local_server;
 extern int sanitize_paths;
 extern int daemon_over_rsh;
 extern unsigned int module_dirlen;
-extern struct filter_list_struct filter_list;
-extern struct filter_list_struct daemon_filter_list;
+extern filter_rule_list filter_list;
+extern filter_rule_list daemon_filter_list;
+
+#define NOT_SPECIFIED (-42)
 
 int make_backups = 0;
 
@@ -73,15 +75,18 @@ int remove_source_files = 0;
 int one_file_system = 0;
 int protocol_version = PROTOCOL_VERSION;
 int sparse_files = 0;
+int preallocate_files = 0;
 int do_compression = 0;
-int def_compress_level = Z_DEFAULT_COMPRESSION;
+int def_compress_level = NOT_SPECIFIED;
 int am_root = 0; /* 0 = normal, 1 = root, 2 = --super, -1 = --fake-super */
 int am_server = 0;
 int am_sender = 0;
 int am_starting_up = 1;
 int relative_paths = -1;
 int implied_dirs = 1;
+int missing_args = 0; /* 0 = FERROR_XFER, 1 = ignore, 2 = delete */
 int numeric_ids = 0;
+int msgs2stderr = 0;
 int allow_8bit_chars = 0;
 int force_delete = 0;
 int io_timeout = 0;
@@ -91,18 +96,17 @@ char *files_from = NULL;
 int filesfrom_fd = -1;
 char *filesfrom_host = NULL;
 int eol_nulls = 0;
-int protect_args = 0;
-int human_readable = 0;
+int protect_args = -1;
+int human_readable = 1;
 int recurse = 0;
 int allow_inc_recurse = 1;
 int xfer_dirs = -1;
 int am_daemon = 0;
-int do_stats = 0;
-int do_progress = 0;
 int connect_timeout = 0;
 int keep_partial = 0;
 int safe_symlinks = 0;
 int copy_unsafe_links = 0;
+int munge_symlinks = 0;
 int size_only = 0;
 int daemon_bwlimit = 0;
 int bwlimit = 0;
@@ -112,8 +116,8 @@ int ignore_existing = 0;
 int ignore_non_existing = 0;
 int need_messages_from_generator = 0;
 int max_delete = INT_MIN;
-OFF_T max_size = 0;
-OFF_T min_size = 0;
+OFF_T max_size = -1;
+OFF_T min_size = -1;
 int ignore_errors = 0;
 int modify_window = 0;
 int blocking_io = -1;
@@ -122,6 +126,7 @@ int inplace = 0;
 int delay_updates = 0;
 long block_size = 0; /* "long" because popt can't set an int32. */
 char *skip_compress = NULL;
+item_list dparam_list = EMPTY_ITEM_LIST;
 
 /** Network address family. **/
 int default_af_hint
@@ -165,6 +170,8 @@ char *rsync_path = RSYNC_PATH;
 char *backup_dir = NULL;
 char backup_dir_buf[MAXPATHLEN];
 char *sockopts = NULL;
+char *usermap = NULL;
+char *groupmap = NULL;
 int rsync_port = 0;
 int compare_dest = 0;
 int copy_dest = 0;
@@ -172,7 +179,10 @@ int link_dest = 0;
 int basis_dir_cnt = 0;
 char *dest_option = NULL;
 
-int verbose = 0;
+static int remote_option_alloc = 0;
+int remote_option_cnt = 0;
+const char **remote_options = NULL;
+
 int quiet = 0;
 int output_motd = 1;
 int log_before_transfer = 0;
@@ -193,8 +203,99 @@ char *iconv_opt = ICONV_OPTION;
 
 struct chmod_mode_struct *chmod_modes = NULL;
 
+static const char *debug_verbosity[] = {
+	/*0*/ NULL,
+	/*1*/ NULL,
+	/*2*/ "BIND,CMD,CONNECT,DEL,DELTASUM,DUP,FILTER,FLIST,ICONV",
+	/*3*/ "ACL,BACKUP,CONNECT2,DELTASUM2,DEL2,EXIT,FILTER2,FLIST2,FUZZY,GENR,OWN,RECV,SEND,TIME",
+	/*4*/ "CMD2,DELTASUM3,DEL3,EXIT2,FLIST3,ICONV2,OWN2,PROTO,TIME2",
+	/*5*/ "CHDIR,DELTASUM4,FLIST4,FUZZY2,HASH,HLINK",
+};
+
+#define MAX_VERBOSITY ((int)(sizeof debug_verbosity / sizeof debug_verbosity[0]) - 1)
+
+static const char *info_verbosity[1+MAX_VERBOSITY] = {
+	/*0*/ NULL,
+	/*1*/ "COPY,DEL,FLIST,MISC,NAME,STATS,SYMSAFE",
+	/*2*/ "BACKUP,MISC2,MOUNT,NAME2,REMOVE,SKIP",
+};
+
+#define MAX_OUT_LEVEL 4 /* The largest N allowed for any flagN word. */
+
+short info_levels[COUNT_INFO], debug_levels[COUNT_DEBUG];
+
+#define DEFAULT_PRIORITY 0 	/* Default/implied/--verbose set values. */
+#define HELP_PRIORITY 1		/* The help output uses this level. */
+#define USER_PRIORITY 2		/* User-specified via --info or --debug */
+#define LIMIT_PRIORITY 3	/* Overriding priority when limiting values. */
+
+#define W_CLI (1<<0)	/* client side */
+#define W_SRV (1<<1)	/* server side */
+#define W_SND (1<<2)	/* sending side */
+#define W_REC (1<<3)	/* receiving side */
+
+struct output_struct {
+	char *name;	/* The name of the info/debug flag. */
+	char *help;	/* The description of the info/debug flag. */
+	uchar namelen;  /* The length of the name string. */
+	uchar flag;	/* The flag's value, for consistency check. */
+	uchar where;	/* Bits indicating where the flag is used. */
+	uchar priority; /* See *_PRIORITY defines. */
+};
+
+#define INFO_WORD(flag, where, help) { #flag, help, sizeof #flag - 1, INFO_##flag, where, 0 }
+
+static struct output_struct info_words[COUNT_INFO+1] = {
+	INFO_WORD(BACKUP, W_REC, "Mention files backed up"),
+	INFO_WORD(COPY, W_REC, "Mention files copied locally on the receiving side"),
+	INFO_WORD(DEL, W_REC, "Mention deletions on the receiving side"),
+	INFO_WORD(FLIST, W_CLI, "Mention file-list receiving/sending (levels 1-2)"),
+	INFO_WORD(MISC, W_SND|W_REC, "Mention miscellaneous information (levels 1-2)"),
+	INFO_WORD(MOUNT, W_SND|W_REC, "Mention mounts that were found or skipped"),
+	INFO_WORD(NAME, W_SND|W_REC, "Mention 1) updated file/dir names, 2) unchanged names"),
+	INFO_WORD(PROGRESS, W_CLI, "Mention 1) per-file progress or 2) total transfer progress"),
+	INFO_WORD(REMOVE, W_SND, "Mention files removed on the sending side"),
+	INFO_WORD(SKIP, W_REC, "Mention files that are skipped due to options used"),
+	INFO_WORD(STATS, W_CLI|W_SRV, "Mention statistics at end of run (levels 1-3)"),
+	INFO_WORD(SYMSAFE, W_SND|W_REC, "Mention symlinks that are unsafe"),
+	{ NULL, "--info", 0, 0, 0, 0 }
+};
+
+#define DEBUG_WORD(flag, where, help) { #flag, help, sizeof #flag - 1, DEBUG_##flag, where, 0 }
+
+static struct output_struct debug_words[COUNT_DEBUG+1] = {
+	DEBUG_WORD(ACL, W_SND|W_REC, "Debug extra ACL info"),
+	DEBUG_WORD(BACKUP, W_REC, "Debug backup actions (levels 1-2)"),
+	DEBUG_WORD(BIND, W_CLI, "Debug socket bind actions"),
+	DEBUG_WORD(CHDIR, W_CLI|W_SRV, "Debug when the current directory changes"),
+	DEBUG_WORD(CONNECT, W_CLI, "Debug connection events (levels 1-2)"),
+	DEBUG_WORD(CMD, W_CLI, "Debug commands+options that are issued (levels 1-2)"),
+	DEBUG_WORD(DEL, W_REC, "Debug delete actions (levels 1-3)"),
+	DEBUG_WORD(DELTASUM, W_SND|W_REC, "Debug delta-transfer checksumming (levels 1-4)"),
+	DEBUG_WORD(DUP, W_REC, "Debug weeding of duplicate names"),
+	DEBUG_WORD(EXIT, W_CLI|W_SRV, "Debug exit events (levels 1-3)"),
+	DEBUG_WORD(FILTER, W_SND|W_REC, "Debug filter actions (levels 1-2)"),
+	DEBUG_WORD(FLIST, W_SND|W_REC, "Debug file-list operations (levels 1-4)"),
+	DEBUG_WORD(FUZZY, W_REC, "Debug fuzzy scoring (levels 1-2)"),
+	DEBUG_WORD(GENR, W_REC, "Debug generator functions"),
+	DEBUG_WORD(HASH, W_SND|W_REC, "Debug hashtable code"),
+	DEBUG_WORD(HLINK, W_SND|W_REC, "Debug hard-link actions (levels 1-3)"),
+	DEBUG_WORD(ICONV, W_CLI|W_SRV, "Debug iconv character conversions (levels 1-2)"),
+	DEBUG_WORD(IO, W_CLI|W_SRV, "Debug I/O routines (levels 1-4)"),
+	DEBUG_WORD(OWN, W_REC, "Debug ownership changes in users & groups (levels 1-2)"),
+	DEBUG_WORD(PROTO, W_CLI|W_SRV, "Debug protocol information"),
+	DEBUG_WORD(RECV, W_REC, "Debug receiver functions"),
+	DEBUG_WORD(SEND, W_SND, "Debug sender functions"),
+	DEBUG_WORD(TIME, W_REC, "Debug setting of modified times (levels 1-2)"),
+	{ NULL, "--debug", 0, 0, 0, 0 }
+};
+
+static int verbose = 0;
+static int do_stats = 0;
+static int do_progress = 0;
 static int daemon_opt;   /* sets am_daemon after option error-reporting */
 static int omit_dir_times = 0;
+static int omit_link_times = 0;
 static int F_option_cnt = 0;
 static int modify_window_set;
 static int itemize_changes = 0;
@@ -202,7 +303,11 @@ static int refused_delete, refused_archive_part, refused_compress;
 static int refused_partial, refused_progress, refused_delete_before;
 static int refused_delete_during;
 static int refused_inplace, refused_no_iconv;
-static char *max_size_arg, *min_size_arg;
+static BOOL usermap_via_chown, groupmap_via_chown;
+#ifdef HAVE_SETVBUF
+static char *outbuf_mode;
+#endif
+static char *bwlimit_arg, *max_size_arg, *min_size_arg;
 static char tmp_partialdir[] = ".~tmp~";
 
 /** Local address to bind.  As a character string because it's
@@ -210,6 +315,251 @@ static char tmp_partialdir[] = ".~tmp~";
  * address, or a hostname. **/
 char *bind_address;
 
+static void output_item_help(struct output_struct *words);
+
+/* This constructs a string that represents all the options set for either
+ * the --info or --debug setting, skipping any implied options (by -v, etc.).
+ * This is used both when conveying the user's options to the server, and
+ * when the help output wants to tell the user what options are implied. */
+static char *make_output_option(struct output_struct *words, short *levels, uchar where)
+{
+	char *str = words == info_words ? "--info=" : "--debug=";
+	int j, counts[MAX_OUT_LEVEL+1], pos, skipped = 0, len = 0, max = 0, lev = 0;
+	int word_count = words == info_words ? COUNT_INFO : COUNT_DEBUG;
+	char *buf;
+
+	memset(counts, 0, sizeof counts);
+
+	for (j = 0; words[j].name; j++) {
+		if (words[j].flag != j) {
+			rprintf(FERROR, "rsync: internal error on %s%s: %d != %d\n",
+				words == info_words ? "INFO_" : "DEBUG_",
+				words[j].name, words[j].flag, j);
+			exit_cleanup(RERR_UNSUPPORTED);
+		}
+		if (!(words[j].where & where))
+			continue;
+		if (words[j].priority == DEFAULT_PRIORITY) {
+			/* Implied items don't need to be mentioned. */
+			skipped++;
+			continue;
+		}
+		len += len ? 1 : strlen(str);
+		len += strlen(words[j].name);
+		len += levels[j] == 1 ? 0 : 1;
+
+		if (words[j].priority == HELP_PRIORITY)
+			continue; /* no abbreviating for help */
+
+		assert(levels[j] <= MAX_OUT_LEVEL);
+		if (++counts[levels[j]] > max) {
+			/* Determine which level has the most items. */
+			lev = levels[j];
+			max = counts[lev];
+		}
+	}
+
+	/* Sanity check the COUNT_* define against the length of the table. */
+	if (j != word_count) {
+		rprintf(FERROR, "rsync: internal error: %s is wrong! (%d != %d)\n",
+			words == info_words ? "COUNT_INFO" : "COUNT_DEBUG",
+			j, word_count);
+		exit_cleanup(RERR_UNSUPPORTED);
+	}
+
+	if (!len)
+		return NULL;
+
+	len++;
+	if (!(buf = new_array(char, len)))
+		out_of_memory("make_output_option");
+	pos = 0;
+
+	if (skipped || max < 5)
+		lev = -1;
+	else {
+		if (lev == 0)
+			pos += snprintf(buf, len, "%sNONE", str);
+		else if (lev == 1)
+			pos += snprintf(buf, len, "%sALL", str);
+		else
+			pos += snprintf(buf, len, "%sALL%d", str, lev);
+	}
+
+	for (j = 0; words[j].name && pos < len; j++) {
+		if (words[j].priority == DEFAULT_PRIORITY || levels[j] == lev || !(words[j].where & where))
+			continue;
+		if (pos)
+			buf[pos++] = ',';
+		else
+			pos += strlcpy(buf+pos, str, len-pos);
+		if (pos < len)
+			pos += strlcpy(buf+pos, words[j].name, len-pos);
+		/* Level 1 is implied by the name alone. */
+		if (levels[j] != 1 && pos < len)
+			buf[pos++] = '0' + levels[j];
+	}
+
+	buf[pos] = '\0';
+
+	return buf;
+}
+
+static void parse_output_words(struct output_struct *words, short *levels,
+			       const char *str, uchar priority)
+{
+	const char *s;
+	int j, len, lev;
+
+	if (!str)
+		return;
+
+	while (*str) {
+		if ((s = strchr(str, ',')) != NULL)
+			len = s++ - str;
+		else
+			len = strlen(str);
+		while (len && isDigit(str+len-1))
+			len--;
+		lev = isDigit(str+len) ? atoi(str+len) : 1;
+		if (lev > MAX_OUT_LEVEL)
+			lev = MAX_OUT_LEVEL;
+		if (len == 4 && strncasecmp(str, "help", 4) == 0) {
+			output_item_help(words);
+			exit_cleanup(0);
+		}
+		if (len == 4 && strncasecmp(str, "none", 4) == 0)
+			len = lev = 0;
+		else if (len == 3 && strncasecmp(str, "all", 3) == 0)
+			len = 0;
+		for (j = 0; words[j].name; j++) {
+			if (!len
+			 || (len == words[j].namelen && strncasecmp(str, words[j].name, len) == 0)) {
+				if (priority >= words[j].priority) {
+					words[j].priority = priority;
+					levels[j] = lev;
+				}
+				if (len)
+					break;
+			}
+		}
+		if (len && !words[j].name) {
+			rprintf(FERROR, "Unknown %s item: \"%.*s\"\n",
+				words[j].help, len, str);
+			exit_cleanup(RERR_SYNTAX);
+		}
+		if (!s)
+			break;
+		str = s;
+	}
+}
+
+/* Tell the user what all the info or debug flags mean. */
+static void output_item_help(struct output_struct *words)
+{
+	short *levels = words == info_words ? info_levels : debug_levels;
+	const char **verbosity = words == info_words ? info_verbosity : debug_verbosity;
+	char buf[128], *opt, *fmt = "%-10s %s\n";
+	int j;
+
+	reset_output_levels();
+
+	rprintf(FINFO, "Use OPT or OPT1 for level 1 output, OPT2 for level 2, etc.; OPT0 silences.\n");
+	rprintf(FINFO, "\n");
+	for (j = 0; words[j].name; j++)
+		rprintf(FINFO, fmt, words[j].name, words[j].help);
+	rprintf(FINFO, "\n");
+
+	snprintf(buf, sizeof buf, "Set all %s options (e.g. all%d)",
+		 words[j].help, MAX_OUT_LEVEL);
+	rprintf(FINFO, fmt, "ALL", buf);
+
+	snprintf(buf, sizeof buf, "Silence all %s options (same as all0)",
+		 words[j].help);
+	rprintf(FINFO, fmt, "NONE", buf);
+
+	rprintf(FINFO, fmt, "HELP", "Output this help message");
+	rprintf(FINFO, "\n");
+	rprintf(FINFO, "Options added for each increase in verbose level:\n");
+
+	for (j = 1; j <= MAX_VERBOSITY; j++) {
+		parse_output_words(words, levels, verbosity[j], HELP_PRIORITY);
+		opt = make_output_option(words, levels, W_CLI|W_SRV|W_SND|W_REC);
+		if (opt) {
+			rprintf(FINFO, "%d) %s\n", j, strchr(opt, '=')+1);
+			free(opt);
+		}
+		reset_output_levels();
+	}
+}
+
+/* The --verbose option now sets info+debug flags. */
+static void set_output_verbosity(int level, uchar priority)
+{
+	int j;
+
+	if (level > MAX_VERBOSITY)
+		level = MAX_VERBOSITY;
+
+	for (j = 1; j <= level; j++) {
+		parse_output_words(info_words, info_levels, info_verbosity[j], priority);
+		parse_output_words(debug_words, debug_levels, debug_verbosity[j], priority);
+	}
+}
+
+/* Limit the info+debug flag levels given a verbose-option level limit. */
+void limit_output_verbosity(int level)
+{
+	short info_limits[COUNT_INFO], debug_limits[COUNT_DEBUG];
+	int j;
+
+	if (level > MAX_VERBOSITY)
+		return;
+
+	memset(info_limits, 0, sizeof info_limits);
+	memset(debug_limits, 0, sizeof debug_limits);
+
+	/* Compute the level limits in the above arrays. */
+	for (j = 1; j <= level; j++) {
+		parse_output_words(info_words, info_limits, info_verbosity[j], LIMIT_PRIORITY);
+		parse_output_words(debug_words, debug_limits, debug_verbosity[j], LIMIT_PRIORITY);
+	}
+
+	for (j = 0; j < COUNT_INFO; j++) {
+		if (info_levels[j] > info_limits[j])
+			info_levels[j] = info_limits[j];
+	}
+
+	for (j = 0; j < COUNT_DEBUG; j++) {
+		if (debug_levels[j] > debug_limits[j])
+			debug_levels[j] = debug_limits[j];
+	}
+}
+
+void reset_output_levels(void)
+{
+	int j;
+
+	memset(info_levels, 0, sizeof info_levels);
+	memset(debug_levels, 0, sizeof debug_levels);
+
+	for (j = 0; j < COUNT_INFO; j++)
+		info_words[j].priority = DEFAULT_PRIORITY;
+
+	for (j = 0; j < COUNT_DEBUG; j++)
+		debug_words[j].priority = DEFAULT_PRIORITY;
+}
+
+void negate_output_levels(void)
+{
+	int j;
+
+	for (j = 0; j < COUNT_INFO; j++)
+		info_levels[j] *= -1;
+
+	for (j = 0; j < COUNT_DEBUG; j++)
+		debug_levels[j] *= -1;
+}
 
 static void print_rsync_version(enum logcode f)
 {
@@ -217,6 +567,7 @@ static void print_rsync_version(enum logcode f)
 	char const *got_socketpair = "no ";
 	char const *have_inplace = "no ";
 	char const *hardlinks = "no ";
+	char const *prealloc = "no ";
 	char const *symtimes = "no ";
 	char const *acls = "no ";
 	char const *xattrs = "no ";
@@ -238,6 +589,9 @@ static void print_rsync_version(enum logcode f)
 #ifdef SUPPORT_HARD_LINKS
 	hardlinks = "";
 #endif
+#ifdef SUPPORT_PREALLOCATION
+	prealloc = "";
+#endif
 #ifdef SUPPORT_ACLS
 	acls = "";
 #endif
@@ -253,13 +607,13 @@ static void print_rsync_version(enum logcode f)
 #ifdef ICONV_OPTION
 	iconv = "";
 #endif
-#if defined HAVE_LUTIMES && defined HAVE_UTIMES
+#ifdef CAN_SET_SYMLINK_TIMES
 	symtimes = "";
 #endif
 
 	rprintf(f, "%s  version %s  protocol version %d%s\n",
 		RSYNC_NAME, RSYNC_VERSION, PROTOCOL_VERSION, subprotocol);
-	rprintf(f, "Copyright (C) 1996-2010 by Andrew Tridgell, Wayne Davison, and others.\n");
+	rprintf(f, "Copyright (C) 1996-2014 by Andrew Tridgell, Wayne Davison, and others.\n");
 	rprintf(f, "Web site: http://rsync.samba.org/\n");
 	rprintf(f, "Android port by Dylan Simon: http://github.com/dylex/android_external_rsync\n");
 	rprintf(f, "Capabilities:\n");
@@ -270,8 +624,8 @@ static void print_rsync_version(enum logcode f)
 		(int)(sizeof (int64) * 8));
 	rprintf(f, "    %ssocketpairs, %shardlinks, %ssymlinks, %sIPv6, batchfiles, %sinplace,\n",
 		got_socketpair, hardlinks, links, ipv6, have_inplace);
-	rprintf(f, "    %sappend, %sACLs, %sxattrs, %siconv, %ssymtimes\n",
-		have_inplace, acls, xattrs, iconv, symtimes);
+	rprintf(f, "    %sappend, %sACLs, %sxattrs, %siconv, %ssymtimes, %sprealloc\n",
+		have_inplace, acls, xattrs, iconv, symtimes, prealloc);
 
 #ifdef MAINTAINER_MODE
 	rprintf(f, "Panic Action: \"%s\"\n", get_panic_action());
@@ -314,6 +668,9 @@ void usage(enum logcode F)
   rprintf(F,"\n");
   rprintf(F,"Options\n");
   rprintf(F," -v, --verbose               increase verbosity\n");
+  rprintf(F,"     --info=FLAGS            fine-grained informational verbosity\n");
+  rprintf(F,"     --debug=FLAGS           fine-grained debug verbosity\n");
+  rprintf(F,"     --msgs2stderr           special output handling for debugging\n");
   rprintf(F," -q, --quiet                 suppress non-error messages\n");
   rprintf(F,"     --no-motd               suppress daemon-mode MOTD (see manpage caveat)\n");
   rprintf(F," -c, --checksum              skip based on checksum, not mod-time & size\n");
@@ -334,6 +691,7 @@ void usage(enum logcode F)
   rprintf(F," -L, --copy-links            transform symlink into referent file/dir\n");
   rprintf(F,"     --copy-unsafe-links     only \"unsafe\" symlinks are transformed\n");
   rprintf(F,"     --safe-links            ignore symlinks that point outside the source tree\n");
+  rprintf(F,"     --munge-links           munge symlinks to make them safer (but unusable)\n");
   rprintf(F," -k, --copy-dirlinks         transform symlink to a dir into referent dir\n");
   rprintf(F," -K, --keep-dirlinks         treat symlinked dir on receiver as dir\n");
   rprintf(F," -H, --hard-links            preserve hard links\n");
@@ -353,11 +711,17 @@ void usage(enum logcode F)
   rprintf(F," -D                          same as --devices --specials\n");
   rprintf(F," -t, --times                 preserve modification times\n");
   rprintf(F," -O, --omit-dir-times        omit directories from --times\n");
+  rprintf(F," -J, --omit-link-times       omit symlinks from --times\n");
   rprintf(F,"     --super                 receiver attempts super-user activities\n");
 #ifdef SUPPORT_XATTRS
   rprintf(F,"     --fake-super            store/recover privileged attrs using xattrs\n");
 #endif
   rprintf(F," -S, --sparse                handle sparse files efficiently\n");
+#ifdef SUPPORT_PREALLOCATION
+  rprintf(F,"     --preallocate           allocate dest files before writing them\n");
+#else
+  rprintf(F,"     --preallocate           pre-allocate dest files on remote receiver\n");
+#endif
   rprintf(F," -n, --dry-run               perform a trial run with no changes made\n");
   rprintf(F," -W, --whole-file            copy files whole (without delta-xfer algorithm)\n");
   rprintf(F," -x, --one-file-system       don't cross filesystem boundaries\n");
@@ -370,10 +734,12 @@ void usage(enum logcode F)
   rprintf(F,"     --del                   an alias for --delete-during\n");
   rprintf(F,"     --delete                delete extraneous files from destination dirs\n");
   rprintf(F,"     --delete-before         receiver deletes before transfer, not during\n");
-  rprintf(F,"     --delete-during         receiver deletes during transfer (default)\n");
+  rprintf(F,"     --delete-during         receiver deletes during the transfer\n");
   rprintf(F,"     --delete-delay          find deletions during, delete after\n");
   rprintf(F,"     --delete-after          receiver deletes after transfer, not during\n");
   rprintf(F,"     --delete-excluded       also delete excluded files from destination dirs\n");
+  rprintf(F,"     --ignore-missing-args   ignore missing source args without error\n");
+  rprintf(F,"     --delete-missing-args   delete missing source args from destination\n");
   rprintf(F,"     --ignore-errors         delete even if there are I/O errors\n");
   rprintf(F,"     --force                 force deletion of directories even if not empty\n");
   rprintf(F,"     --max-delete=NUM        don't delete more than NUM files\n");
@@ -384,9 +750,13 @@ void usage(enum logcode F)
   rprintf(F,"     --delay-updates         put all updated files into place at transfer's end\n");
   rprintf(F," -m, --prune-empty-dirs      prune empty directory chains from the file-list\n");
   rprintf(F,"     --numeric-ids           don't map uid/gid values by user/group name\n");
+  rprintf(F,"     --usermap=STRING        custom username mapping\n");
+  rprintf(F,"     --groupmap=STRING       custom groupname mapping\n");
+  rprintf(F,"     --chown=USER:GROUP      simple username/groupname mapping\n");
   rprintf(F,"     --timeout=SECONDS       set I/O timeout in seconds\n");
   rprintf(F,"     --contimeout=SECONDS    set daemon connection timeout in seconds\n");
   rprintf(F," -I, --ignore-times          don't skip files that match in size and mod-time\n");
+  rprintf(F," -M, --remote-option=OPTION  send OPTION to the remote side only\n");
   rprintf(F,"     --size-only             skip files that match in size\n");
   rprintf(F,"     --modify-window=NUM     compare mod-times with reduced accuracy\n");
   rprintf(F," -T, --temp-dir=DIR          create temporary files in directory DIR\n");
@@ -423,7 +793,10 @@ void usage(enum logcode F)
   rprintf(F,"     --log-file-format=FMT   log updates using the specified FMT\n");
   rprintf(F,"     --password-file=FILE    read daemon-access password from FILE\n");
   rprintf(F,"     --list-only             list the files instead of copying them\n");
-  rprintf(F,"     --bwlimit=KBPS          limit I/O bandwidth; KBytes per second\n");
+  rprintf(F,"     --bwlimit=RATE          limit socket I/O bandwidth\n");
+#ifdef HAVE_SETVBUF
+  rprintf(F,"     --outbuf=N|L|B          set output buffering to None, Line, or Block\n");
+#endif
   rprintf(F,"     --write-batch=FILE      write a batched update to FILE\n");
   rprintf(F,"     --only-write-batch=FILE like --write-batch but w/o updating destination\n");
   rprintf(F,"     --read-batch=FILE       read a batched update from FILE\n");
@@ -431,10 +804,11 @@ void usage(enum logcode F)
 #ifdef ICONV_OPTION
   rprintf(F,"     --iconv=CONVERT_SPEC    request charset conversion of filenames\n");
 #endif
+  rprintf(F,"     --checksum-seed=NUM     set block/file checksum seed (advanced)\n");
   rprintf(F," -4, --ipv4                  prefer IPv4\n");
   rprintf(F," -6, --ipv6                  prefer IPv6\n");
   rprintf(F,"     --version               print version number\n");
-  rprintf(F,"(-h) --help                  show this help (-h works with no other options)\n");
+  rprintf(F,"(-h) --help                  show this help (-h is --help only if used alone)\n");
 
   rprintf(F,"\n");
   rprintf(F,"Use \"rsync --daemon --help\" to see the daemon-mode command-line options.\n");
@@ -446,7 +820,8 @@ enum {OPT_VERSION = 1000, OPT_DAEMON, OPT_SENDER, OPT_EXCLUDE, OPT_EXCLUDE_FROM,
       OPT_FILTER, OPT_COMPARE_DEST, OPT_COPY_DEST, OPT_LINK_DEST, OPT_HELP,
       OPT_INCLUDE, OPT_INCLUDE_FROM, OPT_MODIFY_WINDOW, OPT_MIN_SIZE, OPT_CHMOD,
       OPT_READ_BATCH, OPT_WRITE_BATCH, OPT_ONLY_WRITE_BATCH, OPT_MAX_SIZE,
-      OPT_NO_D, OPT_APPEND, OPT_NO_ICONV,
+      OPT_NO_D, OPT_APPEND, OPT_NO_ICONV, OPT_INFO, OPT_DEBUG,
+      OPT_USERMAP, OPT_GROUPMAP, OPT_CHOWN, OPT_BWLIMIT,
       OPT_SERVER, OPT_REFUSED_BASE = 9000};
 
 static struct poptOption long_options[] = {
@@ -456,6 +831,9 @@ static struct poptOption long_options[] = {
   {"verbose",         'v', POPT_ARG_NONE,   0, 'v', 0, 0 },
   {"no-verbose",       0,  POPT_ARG_VAL,    &verbose, 0, 0, 0 },
   {"no-v",             0,  POPT_ARG_VAL,    &verbose, 0, 0, 0 },
+  {"info",             0,  POPT_ARG_STRING, 0, OPT_INFO, 0, 0 },
+  {"debug",            0,  POPT_ARG_STRING, 0, OPT_DEBUG, 0, 0 },
+  {"msgs2stderr",      0,  POPT_ARG_NONE,   &msgs2stderr, 0, 0, 0 },
   {"quiet",           'q', POPT_ARG_NONE,   0, 'q', 0, 0 },
   {"motd",             0,  POPT_ARG_VAL,    &output_motd, 1, 0, 0 },
   {"no-motd",          0,  POPT_ARG_VAL,    &output_motd, 0, 0, 0 },
@@ -487,12 +865,15 @@ static struct poptOption long_options[] = {
   {"xattrs",          'X', POPT_ARG_NONE,   0, 'X', 0, 0 },
   {"no-xattrs",        0,  POPT_ARG_VAL,    &preserve_xattrs, 0, 0, 0 },
   {"no-X",             0,  POPT_ARG_VAL,    &preserve_xattrs, 0, 0, 0 },
-  {"times",           't', POPT_ARG_VAL,    &preserve_times, 2, 0, 0 },
+  {"times",           't', POPT_ARG_VAL,    &preserve_times, 1, 0, 0 },
   {"no-times",         0,  POPT_ARG_VAL,    &preserve_times, 0, 0, 0 },
   {"no-t",             0,  POPT_ARG_VAL,    &preserve_times, 0, 0, 0 },
   {"omit-dir-times",  'O', POPT_ARG_VAL,    &omit_dir_times, 1, 0, 0 },
   {"no-omit-dir-times",0,  POPT_ARG_VAL,    &omit_dir_times, 0, 0, 0 },
   {"no-O",             0,  POPT_ARG_VAL,    &omit_dir_times, 0, 0, 0 },
+  {"omit-link-times", 'J', POPT_ARG_VAL,    &omit_link_times, 1, 0, 0 },
+  {"no-omit-link-times",0, POPT_ARG_VAL,    &omit_link_times, 0, 0, 0 },
+  {"no-J",             0,  POPT_ARG_VAL,    &omit_link_times, 0, 0, 0 },
   {"modify-window",    0,  POPT_ARG_INT,    &modify_window, OPT_MODIFY_WINDOW, 0, 0 },
   {"super",            0,  POPT_ARG_VAL,    &am_root, 2, 0, 0 },
   {"no-super",         0,  POPT_ARG_VAL,    &am_root, 0, 0, 0 },
@@ -515,6 +896,8 @@ static struct poptOption long_options[] = {
   {"copy-links",      'L', POPT_ARG_NONE,   &copy_links, 0, 0, 0 },
   {"copy-unsafe-links",0,  POPT_ARG_NONE,   &copy_unsafe_links, 0, 0, 0 },
   {"safe-links",       0,  POPT_ARG_NONE,   &safe_symlinks, 0, 0, 0 },
+  {"munge-links",      0,  POPT_ARG_VAL,    &munge_symlinks, 1, 0, 0 },
+  {"no-munge-links",   0,  POPT_ARG_VAL,    &munge_symlinks, 0, 0, 0 },
   {"copy-dirlinks",   'k', POPT_ARG_NONE,   &copy_dirlinks, 0, 0, 0 },
   {"keep-dirlinks",   'K', POPT_ARG_NONE,   &keep_dirlinks, 0, 0, 0 },
   {"hard-links",      'H', POPT_ARG_NONE,   0, 'H', 0, 0 },
@@ -542,6 +925,7 @@ static struct poptOption long_options[] = {
   {"sparse",          'S', POPT_ARG_VAL,    &sparse_files, 1, 0, 0 },
   {"no-sparse",        0,  POPT_ARG_VAL,    &sparse_files, 0, 0, 0 },
   {"no-S",             0,  POPT_ARG_VAL,    &sparse_files, 0, 0, 0 },
+  {"preallocate",      0,  POPT_ARG_NONE,   &preallocate_files, 0, 0, 0},
   {"inplace",          0,  POPT_ARG_VAL,    &inplace, 1, 0, 0 },
   {"no-inplace",       0,  POPT_ARG_VAL,    &inplace, 0, 0, 0 },
   {"append",           0,  POPT_ARG_NONE,   0, OPT_APPEND, 0, 0 },
@@ -554,6 +938,8 @@ static struct poptOption long_options[] = {
   {"delete-delay",     0,  POPT_ARG_VAL,    &delete_during, 2, 0, 0 },
   {"delete-after",     0,  POPT_ARG_NONE,   &delete_after, 0, 0, 0 },
   {"delete-excluded",  0,  POPT_ARG_NONE,   &delete_excluded, 0, 0, 0 },
+  {"delete-missing-args",0,POPT_BIT_SET,    &missing_args, 2, 0, 0 },
+  {"ignore-missing-args",0,POPT_BIT_SET,    &missing_args, 1, 0, 0 },
   {"remove-sent-files",0,  POPT_ARG_VAL,    &remove_source_files, 2, 0, 0 }, /* deprecated */
   {"remove-source-files",0,POPT_ARG_VAL,    &remove_source_files, 1, 0, 0 },
   {"force",            0,  POPT_ARG_VAL,    &force_delete, 1, 0, 0 },
@@ -578,14 +964,16 @@ static struct poptOption long_options[] = {
   {"compare-dest",     0,  POPT_ARG_STRING, 0, OPT_COMPARE_DEST, 0, 0 },
   {"copy-dest",        0,  POPT_ARG_STRING, 0, OPT_COPY_DEST, 0, 0 },
   {"link-dest",        0,  POPT_ARG_STRING, 0, OPT_LINK_DEST, 0, 0 },
-  {"fuzzy",           'y', POPT_ARG_VAL,    &fuzzy_basis, 1, 0, 0 },
+  {"fuzzy",           'y', POPT_ARG_NONE,   0, 'y', 0, 0 },
   {"no-fuzzy",         0,  POPT_ARG_VAL,    &fuzzy_basis, 0, 0, 0 },
   {"no-y",             0,  POPT_ARG_VAL,    &fuzzy_basis, 0, 0, 0 },
   {"compress",        'z', POPT_ARG_NONE,   0, 'z', 0, 0 },
+  {"old-compress",     0,  POPT_ARG_VAL,    &do_compression, 1, 0, 0 },
+  {"new-compress",     0,  POPT_ARG_VAL,    &do_compression, 2, 0, 0 },
   {"no-compress",      0,  POPT_ARG_VAL,    &do_compression, 0, 0, 0 },
   {"no-z",             0,  POPT_ARG_VAL,    &do_compression, 0, 0, 0 },
   {"skip-compress",    0,  POPT_ARG_STRING, &skip_compress, 0, 0, 0 },
-  {"compress-level",   0,  POPT_ARG_INT,    &def_compress_level, 'z', 0, 0 },
+  {"compress-level",   0,  POPT_ARG_INT,    &def_compress_level, 0, 0, 0 },
   {0,                 'P', POPT_ARG_NONE,   0, 'P', 0, 0 },
   {"progress",         0,  POPT_ARG_VAL,    &do_progress, 1, 0, 0 },
   {"no-progress",      0,  POPT_ARG_VAL,    &do_progress, 0, 0, 0 },
@@ -604,7 +992,7 @@ static struct poptOption long_options[] = {
   {"itemize-changes", 'i', POPT_ARG_NONE,   0, 'i', 0, 0 },
   {"no-itemize-changes",0, POPT_ARG_VAL,    &itemize_changes, 0, 0, 0 },
   {"no-i",             0,  POPT_ARG_VAL,    &itemize_changes, 0, 0, 0 },
-  {"bwlimit",          0,  POPT_ARG_INT,    &bwlimit, 0, 0, 0 },
+  {"bwlimit",          0,  POPT_ARG_STRING, &bwlimit_arg, OPT_BWLIMIT, 0, 0 },
   {"no-bwlimit",       0,  POPT_ARG_VAL,    &bwlimit, 0, 0, 0 },
   {"backup",          'b', POPT_ARG_VAL,    &make_backups, 1, 0, 0 },
   {"no-backup",        0,  POPT_ARG_VAL,    &make_backups, 0, 0, 0 },
@@ -622,6 +1010,9 @@ static struct poptOption long_options[] = {
   {"no-s",             0,  POPT_ARG_VAL,    &protect_args, 0, 0, 0},
   {"numeric-ids",      0,  POPT_ARG_VAL,    &numeric_ids, 1, 0, 0 },
   {"no-numeric-ids",   0,  POPT_ARG_VAL,    &numeric_ids, 0, 0, 0 },
+  {"usermap",          0,  POPT_ARG_STRING, 0, OPT_USERMAP, 0, 0 },
+  {"groupmap",         0,  POPT_ARG_STRING, 0, OPT_GROUPMAP, 0, 0 },
+  {"chown",            0,  POPT_ARG_STRING, 0, OPT_CHOWN, 0, 0 },
   {"timeout",          0,  POPT_ARG_INT,    &io_timeout, 0, 0, 0 },
   {"no-timeout",       0,  POPT_ARG_VAL,    &io_timeout, 0, 0, 0 },
   {"contimeout",       0,  POPT_ARG_INT,    &connect_timeout, 0, 0, 0 },
@@ -645,6 +1036,10 @@ static struct poptOption long_options[] = {
   {"password-file",    0,  POPT_ARG_STRING, &password_file, 0, 0, 0 },
   {"blocking-io",      0,  POPT_ARG_VAL,    &blocking_io, 1, 0, 0 },
   {"no-blocking-io",   0,  POPT_ARG_VAL,    &blocking_io, 0, 0, 0 },
+#ifdef HAVE_SETVBUF
+  {"outbuf",           0,  POPT_ARG_STRING, &outbuf_mode, 0, 0, 0 },
+#endif
+  {"remote-option",   'M', POPT_ARG_STRING, 0, 'M', 0, 0 },
   {"protocol",         0,  POPT_ARG_INT,    &protocol_version, 0, 0, 0 },
   {"checksum-seed",    0,  POPT_ARG_INT,    &checksum_seed, 0, 0, 0 },
   {"server",           0,  POPT_ARG_NONE,   0, OPT_SERVER, 0, 0 },
@@ -652,6 +1047,7 @@ static struct poptOption long_options[] = {
   /* All the following options switch us into daemon-mode option-parsing. */
   {"config",           0,  POPT_ARG_STRING, 0, OPT_DAEMON, 0, 0 },
   {"daemon",           0,  POPT_ARG_NONE,   0, OPT_DAEMON, 0, 0 },
+  {"dparam",           0,  POPT_ARG_STRING, 0, OPT_DAEMON, 0, 0 },
   {"detach",           0,  POPT_ARG_NONE,   0, OPT_DAEMON, 0, 0 },
   {"no-detach",        0,  POPT_ARG_NONE,   0, OPT_DAEMON, 0, 0 },
   {0,0,0,0, 0, 0, 0}
@@ -664,8 +1060,9 @@ static void daemon_usage(enum logcode F)
   rprintf(F,"\n");
   rprintf(F,"Usage: rsync --daemon [OPTION]...\n");
   rprintf(F,"     --address=ADDRESS       bind to the specified address\n");
-  rprintf(F,"     --bwlimit=KBPS          limit I/O bandwidth; KBytes per second\n");
+  rprintf(F,"     --bwlimit=RATE          limit socket I/O bandwidth\n");
   rprintf(F,"     --config=FILE           specify alternate rsyncd.conf file\n");
+  rprintf(F," -M, --dparam=OVERRIDE       override global daemon config parameter\n");
   rprintf(F,"     --no-detach             do not detach from the parent\n");
   rprintf(F,"     --port=PORT             listen on alternate port number\n");
   rprintf(F,"     --log-file=FILE         override the \"log file\" setting\n");
@@ -687,6 +1084,7 @@ static struct poptOption long_daemon_options[] = {
   {"bwlimit",          0,  POPT_ARG_INT,    &daemon_bwlimit, 0, 0, 0 },
   {"config",           0,  POPT_ARG_STRING, &config_file, 0, 0, 0 },
   {"daemon",           0,  POPT_ARG_NONE,   &daemon_opt, 0, 0, 0 },
+  {"dparam",          'M', POPT_ARG_STRING, 0, 'M', 0, 0 },
   {"ipv4",            '4', POPT_ARG_VAL,    &default_af_hint, AF_INET, 0, 0 },
   {"ipv6",            '6', POPT_ARG_VAL,    &default_af_hint, AF_INET6, 0, 0 },
   {"detach",           0,  POPT_ARG_VAL,    &no_detach, 0, 0, 0 },
@@ -853,7 +1251,7 @@ static OFF_T parse_size_arg(char **size_arg, char def_suf)
 		size += atoi(arg), make_compatible = 1, arg += 2;
 	if (*arg)
 		return -1;
-	if (size > 0 && make_compatible) {
+	if (size > 0 && make_compatible && def_suf == 'b') {
 		/* We convert this manually because we may need %lld precision,
 		 * and that's not a portable sprintf() escape. */
 		char buf[128], *s = buf + sizeof buf - 1;
@@ -911,7 +1309,7 @@ int parse_arguments(int *argc_p, const char ***argv_p)
 	}
 
 #ifdef ICONV_OPTION
-	if (!am_daemon && !protect_args && (arg = getenv("RSYNC_ICONV")) != NULL && *arg)
+	if (!am_daemon && protect_args <= 0 && (arg = getenv("RSYNC_ICONV")) != NULL && *arg)
 		iconv_opt = strdup(arg);
 #endif
 
@@ -966,14 +1364,28 @@ int parse_arguments(int *argc_p, const char ***argv_p)
 #ifdef ICONV_OPTION
 			iconv_opt = NULL;
 #endif
+			protect_args = 0;
 			poptFreeContext(pc);
 			pc = poptGetContext(RSYNC_NAME, argc, argv,
 					    long_daemon_options, 0);
 			while ((opt = poptGetNextOpt(pc)) != -1) {
+				char **cpp;
 				switch (opt) {
 				case 'h':
 					daemon_usage(FINFO);
 					exit_cleanup(0);
+
+				case 'M':
+					arg = poptGetOptArg(pc);
+					if (!strchr(arg, '=')) {
+						rprintf(FERROR,
+						    "--dparam value is missing an '=': %s\n",
+						    arg);
+						goto daemon_error;
+					}
+					cpp = EXPAND_ITEM_LIST(&dparam_list, char *, 4);
+					*cpp = strdup(arg);
+					break;
 
 				case 'v':
 					verbose++;
@@ -987,6 +1399,9 @@ int parse_arguments(int *argc_p, const char ***argv_p)
 					goto daemon_error;
 				}
 			}
+
+			if (dparam_list.count && !set_dparams(1))
+				exit_cleanup(RERR_SYNTAX);
 
 			if (tmpdir && strlen(tmpdir) >= MAXPATHLEN - 10) {
 				snprintf(err_buf, sizeof err_buf,
@@ -1017,17 +1432,18 @@ int parse_arguments(int *argc_p, const char ***argv_p)
 			break;
 
 		case OPT_FILTER:
-			parse_rule(&filter_list, poptGetOptArg(pc), 0, 0);
+			parse_filter_str(&filter_list, poptGetOptArg(pc),
+					rule_template(0), 0);
 			break;
 
 		case OPT_EXCLUDE:
-			parse_rule(&filter_list, poptGetOptArg(pc),
-				   0, XFLG_OLD_PREFIXES);
+			parse_filter_str(&filter_list, poptGetOptArg(pc),
+					rule_template(0), XFLG_OLD_PREFIXES);
 			break;
 
 		case OPT_INCLUDE:
-			parse_rule(&filter_list, poptGetOptArg(pc),
-				   MATCHFLG_INCLUDE, XFLG_OLD_PREFIXES);
+			parse_filter_str(&filter_list, poptGetOptArg(pc),
+					rule_template(FILTRULE_INCLUDE), XFLG_OLD_PREFIXES);
 			break;
 
 		case OPT_EXCLUDE_FROM:
@@ -1037,20 +1453,22 @@ int parse_arguments(int *argc_p, const char ***argv_p)
 				arg = sanitize_path(NULL, arg, NULL, 0, SP_DEFAULT);
 			if (daemon_filter_list.head) {
 				int rej;
-				char *dir, *cp = strdup(arg);
+				char *cp = strdup(arg);
 				if (!cp)
 					out_of_memory("parse_arguments");
 				if (!*cp)
-					goto options_rejected;
-				dir = cp + (*cp == '/' ? module_dirlen : 0);
-				clean_fname(dir, CFN_COLLAPSE_DOT_DOT_DIRS);
-				rej = check_filter(&daemon_filter_list, FLOG, dir, 0) < 0;
+					rej = 1;
+				else {
+					char *dir = cp + (*cp == '/' ? module_dirlen : 0);
+					clean_fname(dir, CFN_COLLAPSE_DOT_DOT_DIRS);
+					rej = check_filter(&daemon_filter_list, FLOG, dir, 0) < 0;
+				}
 				free(cp);
 				if (rej)
 					goto options_rejected;
 			}
 			parse_filter_file(&filter_list, arg,
-				opt == OPT_INCLUDE_FROM ? MATCHFLG_INCLUDE : 0,
+				rule_template(opt == OPT_INCLUDE_FROM ? FILTRULE_INCLUDE : 0),
 				XFLG_FATAL_ERRORS | XFLG_OLD_PREFIXES);
 			break;
 
@@ -1065,7 +1483,7 @@ int parse_arguments(int *argc_p, const char ***argv_p)
 			preserve_links = 1;
 #endif
 			preserve_perms = 1;
-			preserve_times = 2;
+			preserve_times = 1;
 			preserve_gid = 1;
 			preserve_uid = 1;
 			preserve_devices = 1;
@@ -1096,6 +1514,10 @@ int parse_arguments(int *argc_p, const char ***argv_p)
 			verbose++;
 			break;
 
+		case 'y':
+			fuzzy_basis++;
+			break;
+
 		case 'q':
 			quiet++;
 			break;
@@ -1107,10 +1529,10 @@ int parse_arguments(int *argc_p, const char ***argv_p)
 		case 'F':
 			switch (++F_option_cnt) {
 			case 1:
-				parse_rule(&filter_list,": /.rsync-filter",0,0);
+				parse_filter_str(&filter_list,": /.rsync-filter",rule_template(0),0);
 				break;
 			case 2:
-				parse_rule(&filter_list,"- .rsync-filter",0,0);
+				parse_filter_str(&filter_list,"- .rsync-filter",rule_template(0),0);
 				break;
 			}
 			break;
@@ -1126,18 +1548,27 @@ int parse_arguments(int *argc_p, const char ***argv_p)
 			break;
 
 		case 'z':
-			if (def_compress_level < Z_DEFAULT_COMPRESSION
-			 || def_compress_level > Z_BEST_COMPRESSION) {
+			do_compression++;
+			break;
+
+		case 'M':
+			arg = poptGetOptArg(pc);
+			if (*arg != '-') {
 				snprintf(err_buf, sizeof err_buf,
-					"--compress-level value is invalid: %d\n",
-					def_compress_level);
+					"Remote option must start with a dash: %s\n", arg);
 				return 0;
 			}
-			do_compression = def_compress_level != Z_NO_COMPRESSION;
-			if (do_compression && refused_compress) {
-				create_refuse_error(refused_compress);
-				return 0;
+			if (remote_option_cnt+2 >= remote_option_alloc) {
+				remote_option_alloc += 16;
+				remote_options = realloc_array(remote_options,
+							const char *, remote_option_alloc);
+				if (!remote_options)
+					out_of_memory("parse_arguments");
+				if (!remote_option_cnt)
+					remote_options[0] = "ARG0";
 			}
+			remote_options[++remote_option_cnt] = arg;
+			remote_options[remote_option_cnt+1] = NULL;
 			break;
 
 		case OPT_WRITE_BATCH:
@@ -1162,7 +1593,7 @@ int parse_arguments(int *argc_p, const char ***argv_p)
 			break;
 
 		case OPT_MAX_SIZE:
-			if ((max_size = parse_size_arg(&max_size_arg, 'b')) <= 0) {
+			if ((max_size = parse_size_arg(&max_size_arg, 'b')) < 0) {
 				snprintf(err_buf, sizeof err_buf,
 					"--max-size value is invalid: %s\n",
 					max_size_arg);
@@ -1171,11 +1602,28 @@ int parse_arguments(int *argc_p, const char ***argv_p)
 			break;
 
 		case OPT_MIN_SIZE:
-			if ((min_size = parse_size_arg(&min_size_arg, 'b')) <= 0) {
+			if ((min_size = parse_size_arg(&min_size_arg, 'b')) < 0) {
 				snprintf(err_buf, sizeof err_buf,
 					"--min-size value is invalid: %s\n",
 					min_size_arg);
 				return 0;
+			}
+			break;
+
+		case OPT_BWLIMIT:
+			{
+				OFF_T limit = parse_size_arg(&bwlimit_arg, 'K');
+				if (limit < 0) {
+					snprintf(err_buf, sizeof err_buf,
+						"--bwlimit value is invalid: %s\n", bwlimit_arg);
+					return 0;
+				}
+				bwlimit = (limit + 512) / 1024;
+				if (limit && !bwlimit) {
+					snprintf(err_buf, sizeof err_buf,
+						"--bwlimit value is too small: %s\n", bwlimit_arg);
+					return 0;
+				}
 			}
 			break;
 
@@ -1228,6 +1676,86 @@ int parse_arguments(int *argc_p, const char ***argv_p)
 			}
 			break;
 
+		case OPT_INFO:
+			arg = poptGetOptArg(pc);
+			parse_output_words(info_words, info_levels, arg, USER_PRIORITY);
+			break;
+
+		case OPT_DEBUG:
+			arg = poptGetOptArg(pc);
+			parse_output_words(debug_words, debug_levels, arg, USER_PRIORITY);
+			break;
+
+		case OPT_USERMAP:
+			if (usermap) {
+				if (usermap_via_chown) {
+					snprintf(err_buf, sizeof err_buf,
+					    "--usermap conflicts with prior --chown.\n");
+					return 0;
+				}
+				snprintf(err_buf, sizeof err_buf,
+				    "You can only specify --usermap once.\n");
+				return 0;
+			}
+			usermap = (char *)poptGetOptArg(pc);
+			usermap_via_chown = False;
+			break;
+
+		case OPT_GROUPMAP:
+			if (groupmap) {
+				if (groupmap_via_chown) {
+					snprintf(err_buf, sizeof err_buf,
+					    "--groupmap conflicts with prior --chown.\n");
+					return 0;
+				}
+				snprintf(err_buf, sizeof err_buf,
+				    "You can only specify --groupmap once.\n");
+				return 0;
+			}
+			groupmap = (char *)poptGetOptArg(pc);
+			groupmap_via_chown = False;
+			break;
+
+		case OPT_CHOWN: {
+			const char *chown = poptGetOptArg(pc);
+			int len;
+			if ((arg = strchr(chown, ':')) != NULL)
+				len = arg++ - chown;
+			else
+				len = strlen(chown);
+			if (len) {
+				if (usermap) {
+					if (!usermap_via_chown) {
+						snprintf(err_buf, sizeof err_buf,
+						    "--chown conflicts with prior --usermap.\n");
+						return 0;
+					}
+					snprintf(err_buf, sizeof err_buf,
+					    "You can only specify a user-affecting --chown once.\n");
+					return 0;
+				}
+				if (asprintf(&usermap, "*:%.*s", len, chown) < 0)
+					out_of_memory("parse_arguments");
+				usermap_via_chown = True;
+			}
+			if (arg && *arg) {
+				if (groupmap) {
+					if (!groupmap_via_chown) {
+						snprintf(err_buf, sizeof err_buf,
+						    "--chown conflicts with prior --groupmap.\n");
+						return 0;
+					}
+					snprintf(err_buf, sizeof err_buf,
+					    "You can only specify a group-affecting --chown once.\n");
+					return 0;
+				}
+				if (asprintf(&groupmap, "*:%s", arg) < 0)
+					out_of_memory("parse_arguments");
+				groupmap_via_chown = True;
+			}
+			break;
+		}
+
 		case OPT_HELP:
 			usage(FINFO);
 			exit_cleanup(0);
@@ -1275,10 +1803,91 @@ int parse_arguments(int *argc_p, const char ***argv_p)
 		}
 	}
 
-	if (human_readable && argc == 2 && !am_server) {
+	if (protect_args < 0) {
+		if (am_server)
+			protect_args = 0;
+		else if ((arg = getenv("RSYNC_PROTECT_ARGS")) != NULL && *arg)
+			protect_args = atoi(arg) ? 1 : 0;
+		else {
+#ifdef RSYNC_USE_PROTECTED_ARGS
+			protect_args = 1;
+#else
+			protect_args = 0;
+#endif
+		}
+	}
+
+	if (human_readable > 1 && argc == 2 && !am_server) {
 		/* Allow the old meaning of 'h' (--help) on its own. */
 		usage(FINFO);
 		exit_cleanup(0);
+	}
+
+	if (do_compression || def_compress_level != NOT_SPECIFIED) {
+		if (def_compress_level == NOT_SPECIFIED)
+			def_compress_level = Z_DEFAULT_COMPRESSION;
+		else if (def_compress_level < Z_DEFAULT_COMPRESSION || def_compress_level > Z_BEST_COMPRESSION) {
+			snprintf(err_buf, sizeof err_buf, "--compress-level value is invalid: %d\n",
+				 def_compress_level);
+			return 0;
+		} else if (def_compress_level == Z_NO_COMPRESSION)
+			do_compression = 0;
+		else if (!do_compression)
+			do_compression = 1;
+		if (do_compression && refused_compress) {
+			create_refuse_error(refused_compress);
+			return 0;
+		}
+#ifdef EXTERNAL_ZLIB
+		if (do_compression == 1) {
+			snprintf(err_buf, sizeof err_buf,
+				"This rsync lacks old-style --compress due to its external zlib.  Try -zz.\n");
+			if (am_server)
+				return 0;
+			fprintf(stderr, "%s" "Continuing without compression.\n\n", err_buf);
+			do_compression = 0;
+		}
+#endif
+	}
+
+#ifdef HAVE_SETVBUF
+	if (outbuf_mode && !am_server) {
+		int mode = *(uchar *)outbuf_mode;
+		if (islower(mode))
+			mode = toupper(mode);
+		fflush(stdout); /* Just in case... */
+		switch (mode) {
+		case 'N': /* None */
+		case 'U': /* Unbuffered */
+			mode = _IONBF;
+			break;
+		case 'L': /* Line */
+			mode = _IOLBF;
+			break;
+		case 'B': /* Block */
+		case 'F': /* Full */
+			mode = _IOFBF;
+			break;
+		default:
+			snprintf(err_buf, sizeof err_buf,
+				"Invalid --outbuf setting -- specify N, L, or B.\n");
+			return 0;
+		}
+		setvbuf(stdout, (char *)NULL, mode, 0);
+	}
+
+	if (msgs2stderr) {
+		/* Make stderr line buffered for better sharing of the stream. */
+		fflush(stderr); /* Just in case... */
+		setvbuf(stderr, (char *)NULL, _IOLBF, 0);
+	}
+#endif
+
+	set_output_verbosity(verbose, DEFAULT_PRIORITY);
+
+	if (do_stats) {
+		parse_output_words(info_words, info_levels,
+			verbose > 1 ? "stats3" : "stats2", DEFAULT_PRIORITY);
 	}
 
 #ifdef ICONV_OPTION
@@ -1293,6 +1902,9 @@ int parse_arguments(int *argc_p, const char ***argv_p)
 		return 0;
 	}
 #endif
+
+	if (fuzzy_basis > 1)
+		fuzzy_basis = basis_dir_cnt + 1;
 
 	if (protect_args == 1 && am_server)
 		return 1;
@@ -1331,6 +1943,12 @@ int parse_arguments(int *argc_p, const char ***argv_p)
 		return 0;
 	}
 #endif
+
+	if (block_size > MAX_BLOCK_SIZE) {
+		snprintf(err_buf, sizeof err_buf,
+			 "--block-size=%lu is too large (max: %u)\n", block_size, MAX_BLOCK_SIZE);
+		return 0;
+	}
 
 	if (write_batch && read_batch) {
 		snprintf(err_buf, sizeof err_buf,
@@ -1397,7 +2015,7 @@ int parse_arguments(int *argc_p, const char ***argv_p)
 		list_only |= 1;
 
 	if (xfer_dirs >= 4) {
-		parse_rule(&filter_list, "- /*/*", 0, 0);
+		parse_filter_str(&filter_list, "- /*/*", rule_template(0), 0);
 		recurse = xfer_dirs = 1;
 	} else if (recurse)
 		xfer_dirs = 1;
@@ -1435,7 +2053,9 @@ int parse_arguments(int *argc_p, const char ***argv_p)
 		return 0;
 	}
 
-	if (delete_mode && refused_delete) {
+	if (missing_args == 3) /* simplify if both options were specified */
+		missing_args = 2;
+	if (refused_delete && (delete_mode || missing_args == 2)) {
 		create_refuse_error(refused_delete);
 		return 0;
 	}
@@ -1451,6 +2071,17 @@ int parse_arguments(int *argc_p, const char ***argv_p)
 		need_messages_from_generator = 1;
 	}
 
+	if (munge_symlinks && !am_daemon) {
+		STRUCT_STAT st;
+		char prefix[SYMLINK_PREFIX_LEN]; /* NOT +1 ! */
+		strlcpy(prefix, SYMLINK_PREFIX, sizeof prefix); /* trim the trailing slash */
+		if (do_stat(prefix, &st) == 0 && S_ISDIR(st.st_mode)) {
+			rprintf(FERROR, "Symlink munging is unsafe when a %s directory exists.\n",
+				prefix);
+			exit_cleanup(RERR_UNSUPPORTED);
+		}
+	}
+
 	if (sanitize_paths) {
 		int i;
 		for (i = argc; i-- > 0; )
@@ -1461,7 +2092,7 @@ int parse_arguments(int *argc_p, const char ***argv_p)
 			backup_dir = sanitize_path(NULL, backup_dir, NULL, 0, SP_DEFAULT);
 	}
 	if (daemon_filter_list.head && !am_sender) {
-		struct filter_list_struct *elp = &daemon_filter_list;
+		filter_rule_list *elp = &daemon_filter_list;
 		if (tmpdir) {
 			char *dir;
 			if (!*tmpdir)
@@ -1492,36 +2123,54 @@ int parse_arguments(int *argc_p, const char ***argv_p)
 		return 0;
 	}
 	if (backup_dir) {
-		backup_dir_len = strlcpy(backup_dir_buf, backup_dir, sizeof backup_dir_buf);
-		backup_dir_remainder = sizeof backup_dir_buf - backup_dir_len;
-		if (backup_dir_remainder < 32) {
+		size_t len;
+		while (*backup_dir == '.' && backup_dir[1] == '/')
+			backup_dir += 2;
+		if (*backup_dir == '.' && backup_dir[1] == '\0')
+			backup_dir++;
+		len = strlcpy(backup_dir_buf, backup_dir, sizeof backup_dir_buf);
+		if (len > sizeof backup_dir_buf - 128) {
 			snprintf(err_buf, sizeof err_buf,
 				"the --backup-dir path is WAY too long.\n");
 			return 0;
 		}
-		if (backup_dir_buf[backup_dir_len - 1] != '/') {
+		backup_dir_len = (int)len;
+		if (!backup_dir_len) {
+			backup_dir_len = -1;
+			backup_dir = NULL;
+		} else if (backup_dir_buf[backup_dir_len - 1] != '/') {
 			backup_dir_buf[backup_dir_len++] = '/';
 			backup_dir_buf[backup_dir_len] = '\0';
 		}
-		if (verbose > 1 && !am_sender)
-			rprintf(FINFO, "backup_dir is %s\n", backup_dir_buf);
+		backup_dir_remainder = sizeof backup_dir_buf - backup_dir_len;
+	}
+	if (backup_dir) {
+		/* No need for a suffix or a protect rule. */
 	} else if (!backup_suffix_len && (!am_server || !am_sender)) {
 		snprintf(err_buf, sizeof err_buf,
-			"--suffix cannot be a null string without --backup-dir\n");
+			"--suffix cannot be empty %s\n", backup_dir_len < 0
+			? "when --backup-dir is the same as the dest dir"
+			: "without a --backup-dir");
 		return 0;
 	} else if (make_backups && delete_mode && !delete_excluded && !am_server) {
 		snprintf(backup_dir_buf, sizeof backup_dir_buf,
 			"P *%s", backup_suffix);
-		parse_rule(&filter_list, backup_dir_buf, 0, 0);
+		parse_filter_str(&filter_list, backup_dir_buf, rule_template(0), 0);
+	}
+
+	if (preserve_times) {
+		preserve_times = PRESERVE_FILE_TIMES;
+		if (!omit_dir_times)
+			preserve_times |= PRESERVE_DIR_TIMES;
+#ifdef CAN_SET_SYMLINK_TIMES
+		if (!omit_link_times)
+			preserve_times |= PRESERVE_LINK_TIMES;
+#endif
 	}
 
 	if (make_backups && !backup_dir) {
 		omit_dir_times = 0; /* Implied, so avoid -O to sender. */
-		if (preserve_times > 1)
-			preserve_times = 1;
-	} else if (omit_dir_times) {
-		if (preserve_times > 1)
-			preserve_times = 1;
+		preserve_times &= ~PRESERVE_DIR_TIMES;
 	}
 
 	if (stdout_format) {
@@ -1530,7 +2179,8 @@ int parse_arguments(int *argc_p, const char ***argv_p)
 		else if (log_format_has(stdout_format, 'i'))
 			stdout_format_has_i = itemize_changes | 1;
 		if (!log_format_has(stdout_format, 'b')
-		 && !log_format_has(stdout_format, 'c'))
+		 && !log_format_has(stdout_format, 'c')
+		 && !log_format_has(stdout_format, 'C'))
 			log_before_transfer = !am_server;
 	} else if (itemize_changes) {
 		stdout_format = "%i %n%L";
@@ -1538,15 +2188,18 @@ int parse_arguments(int *argc_p, const char ***argv_p)
 		log_before_transfer = !am_server;
 	}
 
-	if (do_progress && !verbose && !log_before_transfer && !am_server)
-		verbose = 1;
+	if (do_progress && !am_server) {
+		if (!log_before_transfer && INFO_EQ(NAME, 0))
+			parse_output_words(info_words, info_levels, "name", DEFAULT_PRIORITY);
+		parse_output_words(info_words, info_levels, "flist2,progress", DEFAULT_PRIORITY);
+	}
 
 	if (dry_run)
 		do_xfers = 0;
 
 	set_io_timeout(io_timeout);
 
-	if (verbose && !stdout_format) {
+	if (INFO_GTE(NAME, 1) && !stdout_format) {
 		stdout_format = "%n%L";
 		log_before_transfer = !am_server;
 	}
@@ -1643,7 +2296,7 @@ int parse_arguments(int *argc_p, const char ***argv_p)
 	if (files_from) {
 		char *h, *p;
 		int q;
-		if (argc > 2 || (!am_daemon && argc == 1)) {
+		if (argc > 2 || (!am_daemon && !am_server && argc == 1)) {
 			usage(FERROR);
 			exit_cleanup(RERR_SYNTAX);
 		}
@@ -1709,6 +2362,7 @@ void server_options(char **args, int *argc_p)
 {
 	static char argstr[64];
 	int ac = *argc_p;
+	uchar where;
 	char *arg;
 	int i, x;
 
@@ -1753,6 +2407,13 @@ void server_options(char **args, int *argc_p)
 			argstr[x++] = 'm';
 		if (omit_dir_times)
 			argstr[x++] = 'O';
+		if (omit_link_times)
+			argstr[x++] = 'J';
+		if (fuzzy_basis) {
+			argstr[x++] = 'y';
+			if (fuzzy_basis > 1)
+				argstr[x++] = 'y';
+		}
 	} else {
 		if (copy_links)
 			argstr[x++] = 'L';
@@ -1811,12 +2472,14 @@ void server_options(char **args, int *argc_p)
 	}
 	if (sparse_files)
 		argstr[x++] = 'S';
-	if (do_compression)
+	if (do_compression == 1)
 		argstr[x++] = 'z';
 
 	set_allow_inc_recurse();
 
-	/* Checking the pre-negotiated value allows --protocol=29 override. */
+	/* We don't really know the actual protocol_version at this point,
+	 * but checking the pre-negotiated value allows the user to use a
+	 * --protocol=29 override to avoid the use of this -eFLAGS opt. */
 	if (protocol_version >= 30) {
 		/* We make use of the -e option to let the server know about
 		 * any pre-release protocol version && some behavior flags. */
@@ -1831,13 +2494,14 @@ void server_options(char **args, int *argc_p)
 			argstr[x++] = '.';
 		if (allow_inc_recurse)
 			argstr[x++] = 'i';
-#if defined HAVE_LUTIMES && defined HAVE_UTIMES
-		argstr[x++] = 'L';
+#ifdef CAN_SET_SYMLINK_TIMES
+		argstr[x++] = 'L'; /* symlink time-setting support */
 #endif
 #ifdef ICONV_OPTION
-		argstr[x++] = 's';
+		argstr[x++] = 's'; /* symlink iconv translation support */
 #endif
-		argstr[x++] = 'f';
+		argstr[x++] = 'f'; /* flist I/O-error safety support */
+		argstr[x++] = 'x'; /* xattr hardlink optimization not desired */
 	}
 
 	if (x >= (int)sizeof argstr) { /* Not possible... */
@@ -1939,11 +2603,11 @@ void server_options(char **args, int *argc_p)
 			args[ac++] = arg;
 		} else if (max_delete == 0)
 			args[ac++] = "--max-delete=-1";
-		if (min_size) {
+		if (min_size >= 0) {
 			args[ac++] = "--min-size";
 			args[ac++] = min_size_arg;
 		}
-		if (max_size) {
+		if (max_size >= 0) {
 			args[ac++] = "--max-size";
 			args[ac++] = max_size_arg;
 		}
@@ -1967,6 +2631,8 @@ void server_options(char **args, int *argc_p)
 			args[ac++] = "--super";
 		if (size_only)
 			args[ac++] = "--size-only";
+		if (do_stats)
+			args[ac++] = "--stats";
 	} else {
 		if (skip_compress) {
 			if (asprintf(&arg, "--skip-compress=%s", skip_compress) < 0)
@@ -1974,6 +2640,13 @@ void server_options(char **args, int *argc_p)
 			args[ac++] = arg;
 		}
 	}
+
+	/* --delete-missing-args needs the cooperation of both sides, but
+	 * the sender can handle --ignore-missing-args by itself. */
+	if (missing_args == 2)
+		args[ac++] = "--delete-missing-args";
+	else if (missing_args == 1 && !am_sender)
+		args[ac++] = "--ignore-missing-args";
 
 	if (modify_window_set) {
 		if (asprintf(&arg, "--modify-window=%d", modify_window) < 0)
@@ -2013,6 +2686,18 @@ void server_options(char **args, int *argc_p)
 		args[ac++] = "--use-qsort";
 
 	if (am_sender) {
+		if (usermap) {
+			if (asprintf(&arg, "--usermap=%s", usermap) < 0)
+				goto oom;
+			args[ac++] = arg;
+		}
+
+		if (groupmap) {
+			if (asprintf(&arg, "--groupmap=%s", groupmap) < 0)
+				goto oom;
+			args[ac++] = arg;
+		}
+
 		if (ignore_existing)
 			args[ac++] = "--ignore-existing";
 
@@ -2036,6 +2721,16 @@ void server_options(char **args, int *argc_p)
 			}
 		}
 	}
+
+	/* What flags do we need to send to the other side? */
+	where = (am_server ? W_CLI : W_SRV) | (am_sender ? W_REC : W_SND);
+	arg = make_output_option(info_words, info_levels, where);
+	if (arg)
+		args[ac++] = arg;
+
+	arg = make_output_option(debug_words, debug_levels, where);
+	if (arg)
+		args[ac++] = arg;
 
 	if (append_mode) {
 		if (append_mode > 1)
@@ -2061,17 +2756,30 @@ void server_options(char **args, int *argc_p)
 	if (relative_paths && !implied_dirs && (!am_sender || protocol_version >= 30))
 		args[ac++] = "--no-implied-dirs";
 
-	if (fuzzy_basis && am_sender)
-		args[ac++] = "--fuzzy";
-
 	if (remove_source_files == 1)
 		args[ac++] = "--remove-source-files";
 	else if (remove_source_files)
 		args[ac++] = "--remove-sent-files";
 
+	if (preallocate_files && am_sender)
+		args[ac++] = "--preallocate";
+
 	if (ac > MAX_SERVER_ARGS) { /* Not possible... */
 		rprintf(FERROR, "argc overflow in server_options().\n");
 		exit_cleanup(RERR_MALLOC);
+	}
+
+	if (do_compression > 1)
+		args[ac++] = "--new-compress";
+
+	if (remote_option_cnt) {
+		int j;
+		if (ac + remote_option_cnt > MAX_SERVER_ARGS) {
+			rprintf(FERROR, "too many remote options specified.\n");
+			exit_cleanup(RERR_SYNTAX);
+		}
+		for (j = 1; j <= remote_option_cnt; j++)
+			args[ac++] = (char*)remote_options[j];
 	}
 
 	*argc_p = ac;

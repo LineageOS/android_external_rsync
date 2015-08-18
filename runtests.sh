@@ -129,7 +129,10 @@ RUNSHFLAGS='-e'
 export RUNSHFLAGS
 
 # for Solaris
-[ -d /usr/xpg4/bin ] && PATH="/usr/xpg4/bin/:$PATH"
+if [ -d /usr/xpg4/bin ]; then
+    PATH="/usr/xpg4/bin/:$PATH"
+    export PATH
+fi
 
 if [ "x$loglevel" != x ] && [ "$loglevel" -gt 8 ]; then
     if set -x; then
@@ -229,8 +232,9 @@ echo "    scratchbase=$scratchbase"
 [ -d "$scratchbase" ] || mkdir "$scratchbase"
 
 suitedir="$srcdir/testsuite"
+TESTRUN_TIMEOUT=300
 
-export scratchdir suitedir
+export scratchdir suitedir TESTRUN_TIMEOUT
 
 prep_scratch() {
     [ -d "$scratchdir" ] && chmod -R u+rwX "$scratchdir" && rm -rf "$scratchdir"
@@ -261,8 +265,13 @@ do
 
     prep_scratch
 
+    case "$testscript" in
+    *hardlinks*) TESTRUN_TIMEOUT=600 ;;
+    *) TESTRUN_TIMEOUT=300 ;;
+    esac
+
     set +e
-    sh $RUNSHFLAGS "$testscript" >"$scratchdir/test.log" 2>&1
+    "$TOOLDIR/"testrun $RUNSHFLAGS "$testscript" >"$scratchdir/test.log" 2>&1
     result=$?
     set -e
 
