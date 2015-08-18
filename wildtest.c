@@ -1,7 +1,7 @@
 /*
  * Test suite for the wildmatch code.
  *
- * Copyright (C) 2003-2009 Wayne Davison
+ * Copyright (C) 2003-2014 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -50,15 +50,16 @@ static struct poptOption long_options[] = {
 
 /* match just at the start of string (anchored tests) */
 static void
-run_test(int line, bool matches, bool same_as_fnmatch,
+run_test(int line, bool matches,
+#ifdef COMPARE_WITH_FNMATCH
+	 bool same_as_fnmatch,
+#endif
 	 const char *text, const char *pattern)
 {
     bool matched;
 #ifdef COMPARE_WITH_FNMATCH
     bool fn_matched;
     int flags = strstr(pattern, "**")? 0 : FNM_PATHNAME;
-#else
-    same_as_fnmatch = 0; /* Get rid of unused-variable compiler warning. */
 #endif
 
     if (explode_mod) {
@@ -194,7 +195,11 @@ main(int argc, char **argv)
 	    while (*++s == ' ' || *s == '\t') {}
 	}
 	*end[0] = *end[1] = '\0';
-	run_test(line, flag[0], flag[1], string[0], string[1]);
+	run_test(line, flag[0],
+#ifdef COMPARE_WITH_FNMATCH
+		 flag[1],
+#endif
+		 string[0], string[1]);
     }
 
     if (!wildmatch_errors)
