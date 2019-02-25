@@ -72,7 +72,9 @@ LOCAL_SRC_FILES := \
 LOCAL_C_INCLUDES := $(LOCAL_PATH)/popt $(LOCAL_PATH)/zlib
 
 LOCAL_CFLAGS := -DHAVE_CONFIG_H
-LOCAL_CFLAGS += -Wno-error
+LOCAL_CFLAGS += \
+	-Wno-incompatible-pointer-types \
+	-Wno-deprecated-declarations
 
 LOCAL_MODULE := rsync
 LOCAL_MODULE_PATH := $(TARGET_OUT_OPTIONAL_EXECUTABLES)
