@@ -787,7 +787,7 @@
 #define TIME_WITH_SYS_TIME 1
 
 /* Define to 1 if you want rsync to make use of iconv_open() */
-#define USE_ICONV_OPEN 1
+/* #undef USE_ICONV_OPEN */
 
 /* Undefine if you do not want to use openssl crypto library. By default this
    is defined. */
