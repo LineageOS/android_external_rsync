@@ -7,7 +7,7 @@
   rprintf(F,"--quiet, -q              suppress non-error messages\n");
   rprintf(F,"--no-motd                suppress daemon-mode MOTD\n");
   rprintf(F,"--checksum, -c           skip based on checksum, not mod-time & size\n");
-  rprintf(F,"--archive, -a            archive mode; equals -rlptgoD (no -H,-A,-X)\n");
+  rprintf(F,"--archive, -a            archive mode is -rlptgoD (no -A,-X,-U,-N,-H)\n");
   rprintf(F,"--no-OPTION              turn off an implied OPTION (e.g. --no-D)\n");
   rprintf(F,"--recursive, -r          recurse into directories\n");
   rprintf(F,"--relative, -R           use relative path names\n");
@@ -20,7 +20,8 @@
   rprintf(F,"--append                 append data onto shorter files\n");
   rprintf(F,"--append-verify          --append w/old data in file checksum\n");
   rprintf(F,"--dirs, -d               transfer directories without recursing\n");
-  rprintf(F,"--mkpath                 create the destination's path component\n");
+  rprintf(F,"--old-dirs, --old-d      works like --dirs when talking to old rsync\n");
+  rprintf(F,"--mkpath                 create destination's missing path components\n");
   rprintf(F,"--links, -l              copy symlinks as symlinks\n");
   rprintf(F,"--copy-links, -L         transform symlink into referent file/dir\n");
   rprintf(F,"--copy-unsafe-links      only \"unsafe\" symlinks are transformed\n");
@@ -37,6 +38,8 @@
   rprintf(F,"--owner, -o              preserve owner (super-user only)\n");
   rprintf(F,"--group, -g              preserve group\n");
   rprintf(F,"--devices                preserve device files (super-user only)\n");
+  rprintf(F,"--copy-devices           copy device contents as a regular file\n");
+  rprintf(F,"--write-devices          write to devices as files (implies --inplace)\n");
   rprintf(F,"--specials               preserve special files\n");
   rprintf(F,"-D                       same as --devices --specials\n");
   rprintf(F,"--times, -t              preserve modification times\n");
@@ -49,7 +52,6 @@
   rprintf(F,"--fake-super             store/recover privileged attrs using xattrs\n");
   rprintf(F,"--sparse, -S             turn sequences of nulls into sparse blocks\n");
   rprintf(F,"--preallocate            allocate dest files before writing them\n");
-  rprintf(F,"--write-devices          write to devices as files (implies --inplace)\n");
   rprintf(F,"--dry-run, -n            perform a trial run with no changes made\n");
   rprintf(F,"--whole-file, -W         copy files whole (w/o delta-xfer algorithm)\n");
   rprintf(F,"--checksum-choice=STR    choose the checksum algorithm (aka --cc)\n");
@@ -107,7 +109,9 @@
   rprintf(F,"--include-from=FILE      read include patterns from FILE\n");
   rprintf(F,"--files-from=FILE        read list of source-file names from FILE\n");
   rprintf(F,"--from0, -0              all *-from/filter files are delimited by 0s\n");
-  rprintf(F,"--protect-args, -s       no space-splitting; wildcard chars only\n");
+  rprintf(F,"--old-args               disable the modern arg-protection idiom\n");
+  rprintf(F,"--secluded-args, -s      use the protocol to safely send the args\n");
+  rprintf(F,"--trust-sender           trust the remote sender's file list\n");
   rprintf(F,"--copy-as=USER[:GROUP]   specify user & optional group for the copy\n");
   rprintf(F,"--address=ADDRESS        bind address for outgoing socket to daemon\n");
   rprintf(F,"--port=PORT              specify double-colon alternate port number\n");
@@ -130,6 +134,7 @@
   rprintf(F,"--bwlimit=RATE           limit socket I/O bandwidth\n");
   rprintf(F,"--stop-after=MINS        Stop rsync after MINS minutes have elapsed\n");
   rprintf(F,"--stop-at=y-m-dTh:m      Stop rsync at the specified point in time\n");
+  rprintf(F,"--fsync                  fsync every written file\n");
   rprintf(F,"--write-batch=FILE       write a batched update to FILE\n");
   rprintf(F,"--only-write-batch=FILE  like --write-batch but w/o updating dest\n");
   rprintf(F,"--read-batch=FILE        read a batched update from FILE\n");
