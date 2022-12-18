@@ -62,9 +62,6 @@
 /* Define to 1 if you have the <arpa/nameser.h> header file. */
 #define HAVE_ARPA_NAMESER_H 1
 
-/* Define to 1 to enable ASM optimizations */
-/* #undef HAVE_ASM */
-
 /* Define to 1 if you have the `asprintf' function. */
 #define HAVE_ASPRINTF 1
 
@@ -77,8 +74,11 @@
 /* Define to 1 if readdir() is broken */
 /* #undef HAVE_BROKEN_READDIR */
 
+/* Define to 1 if you have the <bsd/string.h> header file. */
+/* #undef HAVE_BSD_STRING_H */
+
 /* Define to 1 if vsprintf has a C99-compatible return value */
-#define HAVE_C99_VSNPRINTF 1
+/* #undef HAVE_C99_VSNPRINTF */
 
 /* Define to 1 if you have the `chflags' function. */
 /* #undef HAVE_CHFLAGS */
@@ -164,7 +164,7 @@
 #define HAVE_GETGROUPS 1
 
 /* Define to 1 if you have the `getpass' function. */
-#define HAVE_GETPASS 1
+/* #undef HAVE_GETPASS */
 
 /* Define to 1 if you have the `getpgrp' function. */
 #define HAVE_GETPGRP 1
@@ -286,10 +286,13 @@
 #define HAVE_LUTIMES 1
 
 /* Define to 1 if you have the <lz4.h> header file. */
-/* #undef HAVE_LZ4_H */
+#define HAVE_LZ4_H 1
 
 /* Define to 1 if you have the `mallinfo' function. */
 #define HAVE_MALLINFO 1
+
+/* Define to 1 if you have the `mallinfo2' function. */
+/* #undef HAVE_MALLINFO2 */
 
 /* Define to 1 if you have the <malloc.h> header file. */
 #define HAVE_MALLOC_H 1
@@ -319,7 +322,7 @@
 #define HAVE_MODE_T 1
 
 /* Define to 1 if you have the `mtrace' function. */
-#define HAVE_MTRACE 1
+/* #undef HAVE_MTRACE */
 
 /* Define to 1 if you have the `nanosleep' function. */
 #define HAVE_NANOSLEEP 1
@@ -329,6 +332,9 @@
 
 /* Define to 1 if you have the <netdb.h> header file. */
 #define HAVE_NETDB_H 1
+
+/* Define to 1 if you have the <netgroup.h> header file. */
+/* #undef HAVE_NETGROUP_H */
 
 /* Define to 1 if you have the <netinet/in_systm.h> header file. */
 #define HAVE_NETINET_IN_SYSTM_H 1
@@ -346,10 +352,10 @@
 #define HAVE_OPEN64 1
 
 /* Define to 1 if you have the <openssl/md4.h> header file. */
-/* #undef HAVE_OPENSSL_MD4_H */
+#define HAVE_OPENSSL_MD4_H 1
 
 /* Define to 1 if you have the <openssl/md5.h> header file. */
-/* #undef HAVE_OPENSSL_MD5_H */
+#define HAVE_OPENSSL_MD5_H 1
 
 /* true if you have Mac OS X ACLs */
 /* #undef HAVE_OSX_ACLS */
@@ -382,10 +388,13 @@
 /* #undef HAVE_REMSH */
 
 /* Define to 1 if mkstemp() is available and works right */
-#define HAVE_SECURE_MKSTEMP 1
+/* #undef HAVE_SECURE_MKSTEMP */
 
 /* Define to 1 if you have the `setattrlist' function. */
 /* #undef HAVE_SETATTRLIST */
+
+/* Define to 1 if you have the `setenv' function. */
+#define HAVE_SETENV 1
 
 /* Define to 1 if you have the `seteuid' function. */
 #define HAVE_SETEUID 1
@@ -410,9 +419,6 @@
 
 /* Define to 1 if you have the `sigprocmask' function. */
 #define HAVE_SIGPROCMASK 1
-
-/* Define to 1 to enable SIMD optimizations */
-/* #undef HAVE_SIMD */
 
 /* Define to 1 if the system has the type `size_t'. */
 #define HAVE_SIZE_T 1
@@ -466,10 +472,10 @@
 #define HAVE_STRING_H 1
 
 /* Define to 1 if you have the `strlcat' function. */
-/* #undef HAVE_STRLCAT */
+#define HAVE_STRLCAT 1
 
 /* Define to 1 if you have the `strlcpy' function. */
-/* #undef HAVE_STRLCPY */
+#define HAVE_STRLCPY 1
 
 /* Define to 1 if you have the `strpbrk' function. */
 #define HAVE_STRPBRK 1
@@ -487,7 +493,7 @@
 #define HAVE_STRUCT_STAT64 1
 
 /* Define to 1 if `st_mtimensec' is a member of `struct stat'. */
-/* #undef HAVE_STRUCT_STAT_ST_MTIMENSEC */
+#define HAVE_STRUCT_STAT_ST_MTIMENSEC 1
 
 /* Define to 1 if `st_mtimespec.tv_nsec' is a member of `struct stat'. */
 /* #undef HAVE_STRUCT_STAT_ST_MTIMESPEC_TV_NSEC */
@@ -578,6 +584,9 @@
 /* true if you have UnixWare ACLs */
 /* #undef HAVE_UNIXWARE_ACLS */
 
+/* Define to 1 if you have the `unsetenv' function. */
+#define HAVE_UNSETENV 1
+
 /* Define to 1 if you have the `usleep' function. */
 #define HAVE_USLEEP 1
 
@@ -612,13 +621,13 @@
 #define HAVE_WAITPID 1
 
 /* Define to 1 if you have the <xxhash.h> header file. */
-/* #undef HAVE_XXHASH_H */
+#define HAVE_XXHASH_H 1
 
 /* Define to 1 if you have the <zlib.h> header file. */
 #define HAVE_ZLIB_H 1
 
 /* Define to 1 if you have the <zstd.h> header file. */
-/* #undef HAVE_ZSTD_H */
+#define HAVE_ZSTD_H 1
 
 /* Define to 1 if you have the `_acl' function. */
 /* #undef HAVE__ACL */
@@ -660,10 +669,10 @@
 #define MKNOD_CREATES_FIFOS 1
 
 /* Define to 1 if mknod() can create sockets. */
-#define MKNOD_CREATES_SOCKETS 1
+/* #undef MKNOD_CREATES_SOCKETS */
 
 /* unprivileged group for unprivileged user */
-#define NOBODY_GROUP "nobody"
+#define NOBODY_GROUP "nogroup"
 
 /* unprivileged user--e.g. nobody */
 #define NOBODY_USER "nobody"
@@ -707,8 +716,8 @@
 /* default -e command */
 #define RSYNC_RSH "ssh"
 
-/* Define to 1 if --protected-args should be the default */
-/* #undef RSYNC_USE_PROTECTED_ARGS */
+/* Define to 1 if --secluded-args should be the default */
+/* #undef RSYNC_USE_SECLUDED_ARGS */
 
 /* Define to 1 if sockets need to be shutdown */
 /* #undef SHUTDOWN_ALL_SOCKETS */
@@ -770,28 +779,35 @@
 /* #undef SUPPORT_ACLS */
 
 /* Undefine if you do not want LZ4 compression. By default this is defined. */
-/* #undef SUPPORT_LZ4 */
+#define SUPPORT_LZ4 1
 
 /* Define to 1 to add support for extended attributes */
 #define SUPPORT_XATTRS 1
 
 /* Undefine if you do not want xxhash checksums. By default this is defined.
    */
-/* #undef SUPPORT_XXHASH */
+#define SUPPORT_XXHASH 1
 
 /* Undefine if you do not want zstd compression. By default this is defined.
    */
 /* #undef SUPPORT_ZSTD */
 
-/* Define to 1 if you can safely include both <sys/time.h> and <time.h>. */
-#define TIME_WITH_SYS_TIME 1
-
 /* Define to 1 if you want rsync to make use of iconv_open() */
 /* #undef USE_ICONV_OPEN */
 
+/* Define to 1 to enable MD5 ASM optimizations */
+/* #undef USE_MD5_ASM */
+
 /* Undefine if you do not want to use openssl crypto library. By default this
    is defined. */
-/* #undef USE_OPENSSL */
+#define USE_OPENSSL 1
+
+/* Define to 1 to enable rolling-checksum ASM optimizations (requires
+   --enable-roll-simd) */
+/* #undef USE_ROLL_ASM */
+
+/* Define to 1 to enable rolling-checksum SIMD optimizations */
+/* #undef USE_ROLL_SIMD */
 
 /* String to pass to iconv() for the UTF-8 charset. */
 #define UTF8_CHARSET "UTF-8"
