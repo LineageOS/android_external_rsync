@@ -3,7 +3,7 @@
  *
  * Copyright (C) 1996-2000 Andrew Tridgell
  * Copyright (C) 1996 Paul Mackerras
- * Copyright (C) 2003-2020 Wayne Davison
+ * Copyright (C) 2003-2022 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -41,6 +41,7 @@ extern int preserve_hard_links;
 extern int preserve_perms;
 extern int write_devices;
 extern int preserve_xattrs;
+extern int do_fsync;
 extern int basis_dir_cnt;
 extern int make_backups;
 extern int cleanup_got_literal;
@@ -55,7 +56,6 @@ extern int inplace;
 extern int inplace_partial;
 extern int allowed_lull;
 extern int delay_updates;
-extern int xfersum_type;
 extern BOOL want_progress_now;
 extern mode_t orig_umask;
 extern struct stats stats;
@@ -66,6 +66,9 @@ extern char sender_file_sum[MAX_DIGEST_LEN];
 extern struct file_list *cur_flist, *first_flist, *dir_flist;
 extern filter_rule_list daemon_filter_list;
 extern OFF_T preallocated_len;
+
+extern struct name_num_item *xfer_sum_nni;
+extern int xfer_sum_len;
 
 static struct bitbag *delayed_bits = NULL;
 static int phase = 0, redoing = 0;
@@ -239,7 +242,6 @@ static int receive_data(int f_in, char *fname_r, int fd_r, OFF_T size_r,
 	static char file_sum1[MAX_DIGEST_LEN];
 	struct map_struct *mapbuf;
 	struct sum_struct sum;
-	int sum_len;
 	int32 len;
 	OFF_T total_size = F_LENGTH(file);
 	OFF_T offset = 0;
@@ -279,7 +281,7 @@ static int receive_data(int f_in, char *fname_r, int fd_r, OFF_T size_r,
 	} else
 		mapbuf = NULL;
 
-	sum_init(xfersum_type, checksum_seed);
+	sum_init(xfer_sum_nni, checksum_seed);
 
 	if (append_mode > 0) {
 		OFF_T j;
@@ -392,15 +394,20 @@ static int receive_data(int f_in, char *fname_r, int fd_r, OFF_T size_r,
 	if (INFO_GTE(PROGRESS, 1))
 		end_progress(total_size);
 
-	sum_len = sum_end(file_sum1);
+	sum_end(file_sum1);
+
+	if (do_fsync && fd != -1 && fsync(fd) != 0) {
+		rsyserr(FERROR, errno, "fsync failed on %s", full_fname(fname));
+		exit_cleanup(RERR_FILEIO);
+	}
 
 	if (mapbuf)
 		unmap_file(mapbuf);
 
-	read_buf(f_in, sender_file_sum, sum_len);
+	read_buf(f_in, sender_file_sum, xfer_sum_len);
 	if (DEBUG_GTE(DELTASUM, 2))
 		rprintf(FINFO,"got file_sum\n");
-	if (fd != -1 && memcmp(file_sum1, sender_file_sum, sum_len) != 0)
+	if (fd != -1 && memcmp(file_sum1, sender_file_sum, xfer_sum_len) != 0)
 		return 0;
 	return 1;
 }
@@ -433,9 +440,8 @@ static void handle_delayed_updates(char *local_name)
 					"rename failed for %s (from %s)",
 					full_fname(fname), partialptr);
 			} else {
-				if (remove_source_files
-				 || (preserve_hard_links && F_IS_HLINKED(file)))
-					send_msg_int(MSG_SUCCESS, ndx);
+				if (remove_source_files || (preserve_hard_links && F_IS_HLINKED(file)))
+					send_msg_success(fname, ndx);
 				handle_partial_dir(partialptr, PDIR_DELETE);
 			}
 		}
@@ -539,6 +545,9 @@ int recv_files(int f_in, int f_out, char *local_name)
 	if (delay_updates)
 		delayed_bits = bitbag_create(cur_flist->used + 1);
 
+	if (whole_file < 0)
+		whole_file = 0;
+
 	progress_init();
 
 	while (1) {
@@ -584,10 +593,13 @@ int recv_files(int f_in, int f_out, char *local_name)
 		if (DEBUG_GTE(RECV, 1))
 			rprintf(FINFO, "recv_files(%s)\n", fname);
 
-		if (daemon_filter_list.head && (*fname != '.' || fname[1] != '\0')
-		 && check_filter(&daemon_filter_list, FLOG, fname, 0) < 0) {
-			rprintf(FERROR, "attempt to hack rsync failed.\n");
-			exit_cleanup(RERR_PROTOCOL);
+		if (daemon_filter_list.head && (*fname != '.' || fname[1] != '\0')) {
+			int filt_flags = S_ISDIR(file->mode) ? NAME_IS_DIR : NAME_IS_FILE;
+			if (check_filter(&daemon_filter_list, FLOG, fname, filt_flags) < 0) {
+				rprintf(FERROR, "ERROR: rejecting file transfer request for daemon excluded file: %s\n",
+					fname);
+				exit_cleanup(RERR_PROTOCOL);
+			}
 		}
 
 #ifdef SUPPORT_XATTRS
@@ -686,7 +698,7 @@ int recv_files(int f_in, int f_out, char *local_name)
 			if (!am_server)
 				discard_receive_data(f_in, file);
 			if (inc_recurse)
-				send_msg_int(MSG_SUCCESS, ndx);
+				send_msg_success(fname, ndx);
 			continue;
 		}
 
@@ -799,13 +811,15 @@ int recv_files(int f_in, int f_out, char *local_name)
 			continue;
 		}
 
-		if (fd1 != -1 && !(S_ISREG(st.st_mode) || (write_devices && IS_DEVICE(st.st_mode)))) {
+		if (write_devices && IS_DEVICE(st.st_mode)) {
+			if (fd1 != -1 && st.st_size == 0)
+				st.st_size = get_device_size(fd1, fname);
+			/* Mark the file entry as a device so that we don't try to truncate it later on. */
+			file->mode = S_IFBLK | (file->mode & ACCESSPERMS);
+		} else if (fd1 != -1 && !(S_ISREG(st.st_mode))) {
 			close(fd1);
 			fd1 = -1;
 		}
-
-		if (fd1 != -1 && IS_DEVICE(st.st_mode) && st.st_size == 0)
-			st.st_size = get_device_size(fd1, fname);
 
 		/* If we're not preserving permissions, change the file-list's
 		 * mode based on the local permissions and some heuristics. */
@@ -826,6 +840,12 @@ int recv_files(int f_in, int f_out, char *local_name)
 		if (inplace || one_inplace)  {
 			fnametmp = one_inplace ? partialptr : fname;
 			fd2 = do_open(fnametmp, O_WRONLY|O_CREAT, 0600);
+#ifdef linux
+			if (fd2 == -1 && errno == EACCES) {
+				/* Maybe the error was due to protected_regular setting? */
+				fd2 = do_open(fname, O_WRONLY, 0600);
+			}
+#endif
 			if (fd2 == -1) {
 				rsyserr(FERROR_XFER, errno, "open %s failed",
 					full_fname(fnametmp));
@@ -878,7 +898,7 @@ int recv_files(int f_in, int f_out, char *local_name)
 					do_unlink(partialptr);
 				handle_partial_dir(partialptr, PDIR_DELETE);
 			}
-		} else if (keep_partial && partialptr && !one_inplace) {
+		} else if (keep_partial && partialptr && (!one_inplace || delay_updates)) {
 			if (!handle_partial_dir(partialptr, PDIR_CREATE)) {
 				rprintf(FERROR,
 					"Unable to create partial-dir for %s -- discarding %s.\n",
@@ -906,13 +926,12 @@ int recv_files(int f_in, int f_out, char *local_name)
 		case 2:
 			break;
 		case 1:
-			if (remove_source_files || inc_recurse
-			 || (preserve_hard_links && F_IS_HLINKED(file)))
-				send_msg_int(MSG_SUCCESS, ndx);
+			if (remove_source_files || inc_recurse || (preserve_hard_links && F_IS_HLINKED(file)))
+				send_msg_success(fname, ndx);
 			break;
 		case 0: {
 			enum logcode msgtype = redoing ? FERROR_XFER : FWARNING;
-			if (msgtype == FERROR_XFER || INFO_GTE(NAME, 1)) {
+			if (msgtype == FERROR_XFER || INFO_GTE(NAME, 1) || stdout_format_has_i) {
 				char *errstr, *redostr, *keptstr;
 				if (!(keep_partial && partialptr) && !inplace)
 					keptstr = "discarded";

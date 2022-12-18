@@ -1,7 +1,7 @@
 /*
  * Some usage & version related functions.
  *
- * Copyright (C) 2002-2020 Wayne Davison
+ * Copyright (C) 2002-2022 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -18,12 +18,13 @@
  */
 
 #include "rsync.h"
+#include "version.h"
 #include "latest-year.h"
 #include "git-version.h"
 #include "default-cvsignore.h"
+#include "itypes.h"
 
-extern struct name_num_obj valid_checksums;
-extern struct name_num_obj valid_compressions;
+extern struct name_num_obj valid_checksums, valid_compressions, valid_auth_checksums;
 
 static char *istring(const char *fmt, int val)
 {
@@ -36,7 +37,8 @@ static char *istring(const char *fmt, int val)
 static void print_info_flags(enum logcode f)
 {
 	STRUCT_STAT *dumstat;
-	char line_buf[75];
+	BOOL as_json = f == FNONE ? 1 : 0; /* We use 1 == first attribute, 2 == need closing array */
+	char line_buf[75], item_buf[32];
 	int line_len, j;
 	char *info_flags[] = {
 
@@ -52,6 +54,16 @@ static void print_info_flags(enum logcode f)
 #endif
 			"socketpairs",
 
+#ifndef SUPPORT_LINKS
+		"no "
+#endif
+			"symlinks",
+
+#ifndef CAN_SET_SYMLINK_TIMES
+		"no "
+#endif
+			"symtimes",
+
 #ifndef SUPPORT_HARD_LINKS
 		"no "
 #endif
@@ -62,10 +74,10 @@ static void print_info_flags(enum logcode f)
 #endif
 			"hardlink-specials",
 
-#ifndef SUPPORT_LINKS
+#ifndef CAN_HARDLINK_SYMLINK
 		"no "
 #endif
-			"symlinks",
+			"hardlink-symlinks",
 
 #ifndef INET6
 		"no "
@@ -99,22 +111,17 @@ static void print_info_flags(enum logcode f)
 #endif
 			"xattrs",
 
-#ifdef RSYNC_USE_PROTECTED_ARGS
+#ifdef RSYNC_USE_SECLUDED_ARGS
 		"default "
 #else
 		"optional "
 #endif
-			"protect-args",
+			"secluded-args",
 
 #ifndef ICONV_OPTION
 		"no "
 #endif
 			"iconv",
-
-#ifndef CAN_SET_SYMLINK_TIMES
-		"no "
-#endif
-			"symtimes",
 
 #ifndef SUPPORT_PREALLOCATION
 		"no "
@@ -133,64 +140,161 @@ static void print_info_flags(enum logcode f)
 
 	"*Optimizations",
 
-#ifndef HAVE_SIMD
+#ifndef USE_ROLL_SIMD
 		"no "
 #endif
-			"SIMD",
+			"SIMD-roll",
 
-#ifndef HAVE_ASM
+#ifndef USE_ROLL_ASM
 		"no "
 #endif
-			"asm",
+			"asm-roll",
 
 #ifndef USE_OPENSSL
 		"no "
 #endif
 			"openssl-crypto",
 
+#ifndef USE_MD5_ASM
+		"no "
+#endif
+			"asm-MD5",
+
 		NULL
 	};
 
 	for (line_len = 0, j = 0; ; j++) {
 		char *str = info_flags[j], *next_nfo = str ? info_flags[j+1] : NULL;
-		int str_len = str && *str != '*' ? strlen(str) : 1000;
 		int need_comma = next_nfo && *next_nfo != '*' ? 1 : 0;
-		if (line_len && line_len + 1 + str_len + need_comma >= (int)sizeof line_buf) {
-			rprintf(f, "   %s\n", line_buf);
+		int item_len;
+		if (!str || *str == '*')
+			item_len = 1000;
+		else if (as_json) {
+			char *space = strchr(str, ' ');
+			int is_no = space && strncmp(str, "no ", 3) == 0;
+			int is_bits = space && isDigit(str);
+			char *quot = space && !is_no && !is_bits ? "\"" : "";
+			char *item = space ? space + 1 : str;
+			char *val = !space ? "true" : is_no ? "false" : str;
+			int val_len = !space ? 4 : is_no ? 5 : space - str;
+			if (is_bits && (space = strchr(val, '-')) != NULL)
+			    val_len = space - str;
+			item_len = snprintf(item_buf, sizeof item_buf,
+					   " \"%s%s\": %s%.*s%s%s", item, is_bits ? "bits" : "",
+					   quot, val_len, val, quot, need_comma ? "," : "");
+			if (is_bits)
+				item_buf[strlen(item)+2-1] = '_'; /* Turn the 's' into a '_' */
+			for (space = item; (space = strpbrk(space, " -")) != NULL; space++)
+				item_buf[space - item + 2] = '_';
+		} else
+			item_len = snprintf(item_buf, sizeof item_buf, " %s%s", str, need_comma ? "," : "");
+		if (line_len && line_len + item_len >= (int)sizeof line_buf) {
+			if (as_json)
+				printf("   %s\n", line_buf);
+			else
+				rprintf(f, "   %s\n", line_buf);
 			line_len = 0;
 		}
 		if (!str)
 			break;
 		if (*str == '*') {
-			rprintf(f, "%s:\n", str+1);
-			continue;
+			if (as_json) {
+				if (as_json == 2)
+					printf("  }");
+				else
+					as_json = 2;
+				printf(",\n  \"%c%s\": {\n", toLower(str+1), str+2);
+			} else
+				rprintf(f, "%s:\n", str+1);
+		} else {
+			strlcpy(line_buf + line_len, item_buf, sizeof line_buf - line_len);
+			line_len += item_len;
 		}
-		line_len += snprintf(line_buf+line_len, sizeof line_buf - line_len, " %s%s", str, need_comma ? "," : "");
 	}
+	if (as_json == 2)
+		printf("  }");
 }
 
+static void output_nno_list(enum logcode f, const char *name, struct name_num_obj *nno)
+{
+	char namebuf[64], tmpbuf[256];
+	char *tok, *next_tok, *comma = ",";
+	char *cp;
+
+	/* Using '(' ensures that we get a trailing "none" but also includes aliases. */
+	get_default_nno_list(nno, tmpbuf, sizeof tmpbuf - 1, '(');
+	if (f != FNONE) {
+		rprintf(f, "%s:\n", name);
+		rprintf(f, "    %s\n", tmpbuf);
+		return;
+	}
+
+	strlcpy(namebuf, name, sizeof namebuf);
+	for (cp = namebuf; *cp; cp++) {
+		if (*cp == ' ')
+			*cp = '_';
+		else if (isUpper(cp))
+			*cp = toLower(cp);
+	}
+
+	printf(",\n  \"%s\": [\n   ", namebuf);
+
+	for (tok = strtok(tmpbuf, " "); tok; tok = next_tok) {
+		next_tok = strtok(NULL, " ");
+		if (*tok != '(') /* Ignore the alises in the JSON output */
+			printf(" \"%s\"%s", tok, comma + (next_tok ? 0 : 1));
+	}
+
+	printf("\n  ]");
+}
+
+/* A request of f == FNONE wants json on stdout. */
 void print_rsync_version(enum logcode f)
 {
-	char tmpbuf[256], *subprotocol = "";
+	char copyright[] = "(C) 1996-" LATEST_YEAR " by Andrew Tridgell, Wayne Davison, and others.";
+	char url[] = "https://rsync.samba.org/";
+	BOOL first_line = 1;
 
+#define json_line(name, value) \
+	do { \
+		printf("%c\n  \"%s\": \"%s\"", first_line ? '{' : ',', name, value); \
+		first_line = 0; \
+	} while (0)
+
+	if (f == FNONE) {
+		char verbuf[32];
+		json_line("program", RSYNC_NAME);
+		json_line("version", rsync_version());
+		(void)snprintf(verbuf, sizeof verbuf, "%d.%d", PROTOCOL_VERSION, SUBPROTOCOL_VERSION);
+		json_line("protocol", verbuf);
+		json_line("copyright", copyright);
+		json_line("url", url);
+	} else {
 #if SUBPROTOCOL_VERSION != 0
-	subprotocol = istring(".PR%d", SUBPROTOCOL_VERSION);
+		char *subprotocol = istring(".PR%d", SUBPROTOCOL_VERSION);
+#else
+		char *subprotocol = "";
 #endif
-	rprintf(f, "%s  version %s  protocol version %d%s\n",
-		RSYNC_NAME, rsync_version(), PROTOCOL_VERSION, subprotocol);
-
-	rprintf(f, "Copyright (C) 1996-" LATEST_YEAR " by Andrew Tridgell, Wayne Davison, and others.\n");
-	rprintf(f, "Web site: https://rsync.samba.org/\n");
+		rprintf(f, "%s  version %s  protocol version %d%s\n",
+			RSYNC_NAME, rsync_version(), PROTOCOL_VERSION, subprotocol);
+		rprintf(f, "Copyright %s\n", copyright);
+		rprintf(f, "Web site: %s\n", url);
+	}
 
 	print_info_flags(f);
 
-	rprintf(f, "Checksum list:\n");
-	get_default_nno_list(&valid_checksums, tmpbuf, sizeof tmpbuf, '(');
-	rprintf(f, "    %s\n", tmpbuf);
+	init_checksum_choices();
 
-	rprintf(f, "Compress list:\n");
-	get_default_nno_list(&valid_compressions, tmpbuf, sizeof tmpbuf, '(');
-	rprintf(f, "    %s\n", tmpbuf);
+	output_nno_list(f, "Checksum list", &valid_checksums);
+	output_nno_list(f, "Compress list", &valid_compressions);
+	output_nno_list(f, "Daemon auth list", &valid_auth_checksums);
+
+	if (f == FNONE) {
+		json_line("license", "GPLv3");
+		json_line("caveat", "rsync comes with ABSOLUTELY NO WARRANTY");
+		printf("\n}\n");
+		return;
+	}
 
 #ifdef MAINTAINER_MODE
 	rprintf(f, "Panic Action: \"%s\"\n", get_panic_action());
@@ -234,7 +338,7 @@ void usage(enum logcode F)
 #include "help-rsync.h"
   rprintf(F,"\n");
   rprintf(F,"Use \"rsync --daemon --help\" to see the daemon-mode command-line options.\n");
-  rprintf(F,"Please see the rsync(1) and rsyncd.conf(5) man pages for full documentation.\n");
+  rprintf(F,"Please see the rsync(1) and rsyncd.conf(5) manpages for full documentation.\n");
   rprintf(F,"See https://rsync.samba.org/ for updates, bug reports, and answers\n");
 }
 
@@ -247,12 +351,18 @@ void daemon_usage(enum logcode F)
 #include "help-rsyncd.h"
   rprintf(F,"\n");
   rprintf(F,"If you were not trying to invoke rsync as a daemon, avoid using any of the\n");
-  rprintf(F,"daemon-specific rsync options.  See also the rsyncd.conf(5) man page.\n");
+  rprintf(F,"daemon-specific rsync options.  See also the rsyncd.conf(5) manpage.\n");
 }
 
 const char *rsync_version(void)
 {
-	return RSYNC_GITVER;
+	char *ver;
+#ifdef RSYNC_GITVER
+	ver = RSYNC_GITVER;
+#else
+	ver = RSYNC_VERSION;
+#endif
+	return *ver == 'v' ? ver+1 : ver;
 }
 
 const char *default_cvsignore(void)

@@ -4,7 +4,7 @@
  * Copyright (C) 1996-2001 Andrew Tridgell <tridge@samba.org>
  * Copyright (C) 1996 Paul Mackerras
  * Copyright (C) 2001, 2002 Martin Pool <mbp@samba.org>
- * Copyright (C) 2003-2020 Wayne Davison
+ * Copyright (C) 2003-2022 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -48,6 +48,7 @@ extern int called_from_signal_handler;
 extern int need_messages_from_generator;
 extern int kluge_around_eof;
 extern int got_xfer_error;
+extern int old_style_args;
 extern int msgs2stderr;
 extern int module_id;
 extern int read_only;
@@ -87,6 +88,7 @@ extern BOOL shutting_down;
 extern int backup_dir_len;
 extern int basis_dir_cnt;
 extern int default_af_hint;
+extern int stdout_format_has_i;
 extern struct stats stats;
 extern char *stdout_format;
 extern char *logfile_format;
@@ -102,7 +104,7 @@ extern char curr_dir[MAXPATHLEN];
 extern char backup_dir_buf[MAXPATHLEN];
 extern char *basis_dir[MAX_BASIS_DIRS+1];
 extern struct file_list *first_flist;
-extern filter_rule_list daemon_filter_list;
+extern filter_rule_list daemon_filter_list, implied_filter_list;
 
 uid_t our_uid;
 gid_t our_gid;
@@ -466,38 +468,33 @@ static void output_summary(void)
  **/
 static void show_malloc_stats(void)
 {
-#ifdef HAVE_MALLINFO
-	struct mallinfo mi;
-
-	mi = mallinfo();
+#ifdef MEM_ALLOC_INFO
+	struct MEM_ALLOC_INFO mi = MEM_ALLOC_INFO(); /* mallinfo or mallinfo2 */
 
 	rprintf(FCLIENT, "\n");
 	rprintf(FINFO, RSYNC_NAME "[%d] (%s%s%s) heap statistics:\n",
 		(int)getpid(), am_server ? "server " : "",
 		am_daemon ? "daemon " : "", who_am_i());
-	rprintf(FINFO, "  arena:     %10ld   (bytes from sbrk)\n",
-		(long)mi.arena);
-	rprintf(FINFO, "  ordblks:   %10ld   (chunks not in use)\n",
-		(long)mi.ordblks);
-	rprintf(FINFO, "  smblks:    %10ld\n",
-		(long)mi.smblks);
-	rprintf(FINFO, "  hblks:     %10ld   (chunks from mmap)\n",
-		(long)mi.hblks);
-	rprintf(FINFO, "  hblkhd:    %10ld   (bytes from mmap)\n",
-		(long)mi.hblkhd);
-	rprintf(FINFO, "  allmem:    %10ld   (bytes from sbrk + mmap)\n",
-		(long)mi.arena + mi.hblkhd);
-	rprintf(FINFO, "  usmblks:   %10ld\n",
-		(long)mi.usmblks);
-	rprintf(FINFO, "  fsmblks:   %10ld\n",
-		(long)mi.fsmblks);
-	rprintf(FINFO, "  uordblks:  %10ld   (bytes used)\n",
-		(long)mi.uordblks);
-	rprintf(FINFO, "  fordblks:  %10ld   (bytes free)\n",
-		(long)mi.fordblks);
-	rprintf(FINFO, "  keepcost:  %10ld   (bytes in releasable chunk)\n",
-		(long)mi.keepcost);
-#endif /* HAVE_MALLINFO */
+
+#define PRINT_ALLOC_NUM(title, descr, num) \
+	rprintf(FINFO, "  %-11s%10" SIZE_T_FMT_MOD "d   (" descr ")\n", \
+		title ":", (SIZE_T_FMT_CAST)(num));
+
+	PRINT_ALLOC_NUM("arena", "bytes from sbrk", mi.arena);
+	PRINT_ALLOC_NUM("ordblks", "chunks not in use", mi.ordblks);
+	PRINT_ALLOC_NUM("smblks", "free fastbin blocks", mi.smblks);
+	PRINT_ALLOC_NUM("hblks", "chunks from mmap", mi.hblks);
+	PRINT_ALLOC_NUM("hblkhd", "bytes from mmap", mi.hblkhd);
+	PRINT_ALLOC_NUM("allmem", "bytes from sbrk + mmap", mi.arena + mi.hblkhd);
+	PRINT_ALLOC_NUM("usmblks", "always 0", mi.usmblks);
+	PRINT_ALLOC_NUM("fsmblks", "bytes in freed fastbin blocks", mi.fsmblks);
+	PRINT_ALLOC_NUM("uordblks", "bytes used", mi.uordblks);
+	PRINT_ALLOC_NUM("fordblks", "bytes free", mi.fordblks);
+	PRINT_ALLOC_NUM("keepcost", "bytes in releasable chunk", mi.keepcost);
+
+#undef PRINT_ALLOC_NUM
+
+#endif /* MEM_ALLOC_INFO */
 }
 
 
@@ -611,11 +608,7 @@ static pid_t do_cmd(char *cmd, char *machine, char *user, char **remote_argv, in
 				rprintf(FERROR, "internal: args[] overflowed in do_cmd()\n");
 				exit_cleanup(RERR_SYNTAX);
 			}
-			if (**remote_argv == '-') {
-				if (asprintf(args + argc++, "./%s", *remote_argv++) < 0)
-					out_of_memory("do_cmd");
-			} else
-				args[argc++] = *remote_argv++;
+			args[argc++] = safe_arg(NULL, *remote_argv++);
 			remote_argc--;
 		}
 	}
@@ -667,6 +660,16 @@ static pid_t do_cmd(char *cmd, char *machine, char *user, char **remote_argv, in
 	return pid;
 }
 
+/* Older versions turn an empty string as a reference to the current directory.
+ * We now treat this as an error unless --old-args was used. */
+static char *dot_dir_or_error()
+{
+	if (old_style_args || am_server)
+		return ".";
+	rprintf(FERROR, "Empty destination arg specified (use \".\" or see --old-args).\n");
+	exit_cleanup(RERR_SYNTAX);
+}
+
 /* The receiving side operates in one of two modes:
  *
  * 1. it receives any number of files into a destination directory,
@@ -694,9 +697,8 @@ static char *get_local_name(struct file_list *flist, char *dest_path)
 	if (!dest_path || list_only)
 		return NULL;
 
-	/* Treat an empty string as a copy into the current directory. */
 	if (!*dest_path)
-		dest_path = ".";
+		dest_path = dot_dir_or_error();
 
 	if (daemon_filter_list.head) {
 		char *slash = strrchr(dest_path, '/');
@@ -721,18 +723,21 @@ static char *get_local_name(struct file_list *flist, char *dest_path)
 	trailing_slash = cp && !cp[1];
 
 	if (mkpath_dest_arg && statret < 0 && (cp || file_total > 1)) {
+		int save_errno = errno;
 		int ret = make_path(dest_path, file_total > 1 && !trailing_slash ? 0 : MKP_DROP_NAME);
 		if (ret < 0)
 			goto mkdir_error;
-		if (INFO_GTE(NAME, 1)) {
+		if (ret && (INFO_GTE(NAME, 1) || stdout_format_has_i)) {
 			if (file_total == 1 || trailing_slash)
 				*cp = '\0';
 			rprintf(FINFO, "created %d director%s for %s\n", ret, ret == 1 ? "y" : "ies", dest_path);
 			if (file_total == 1 || trailing_slash)
 				*cp = '/';
 		}
-		if (file_total > 1 || trailing_slash)
+		if (ret)
 			statret = do_stat(dest_path, &st);
+		else
+			errno = save_errno;
 	}
 
 	if (statret == 0) {
@@ -788,7 +793,7 @@ static char *get_local_name(struct file_list *flist, char *dest_path)
 		 && strcmp(flist->files[flist->low]->basename, ".") == 0)
 			flist->files[0]->flags |= FLAG_DIR_CREATED;
 
-		if (INFO_GTE(NAME, 1))
+		if (INFO_GTE(NAME, 1) || stdout_format_has_i)
 			rprintf(FINFO, "created directory %s\n", dest_path);
 
 		if (dry_run) {
@@ -1080,6 +1085,7 @@ static int do_recv(int f_in, int f_out, char *local_name)
 	}
 
 	am_generator = 1;
+	implied_filter_list.head = implied_filter_list.tail = NULL;
 	flist_receiving_enabled = True;
 
 	io_end_multiplex_in(MPLX_SWITCHING);
@@ -1435,6 +1441,8 @@ static int start_client(int argc, char *argv[])
 
 			if (argc > 1) {
 				p = argv[--argc];
+				if (!*p)
+					p = dot_dir_or_error();
 				remote_argv = argv + argc;
 			} else {
 				static char *dotarg[1] = { "." };
@@ -1475,6 +1483,10 @@ static int start_client(int argc, char *argv[])
 		rsync_port = 0;
 	}
 
+	/* A local transfer doesn't unbackslash anything, so leave the args alone. */
+	if (local_server)
+		old_style_args = 2;
+
 	if (!rsync_port && remote_argc && !**remote_argv) /* Turn an empty arg into a dot dir. */
 		*remote_argv = ".";
 
@@ -1500,6 +1512,8 @@ static int start_client(int argc, char *argv[])
 		char *dummy_host;
 		int dummy_port = rsync_port;
 		int i;
+		if (filesfrom_fd < 0)
+			add_implied_include(remote_argv[0], daemon_connection);
 		/* For remote source, any extra source args must have either
 		 * the same hostname or an empty hostname. */
 		for (i = 1; i < remote_argc; i++) {
@@ -1523,6 +1537,7 @@ static int start_client(int argc, char *argv[])
 			if (!rsync_port && !*arg) /* Turn an empty arg into a dot dir. */
 				arg = ".";
 			remote_argv[i] = arg;
+			add_implied_include(arg, daemon_connection);
 		}
 	}
 
@@ -1564,6 +1579,8 @@ static int start_client(int argc, char *argv[])
 #ifdef HAVE_PUTENV
 	if (daemon_connection)
 		set_env_num("RSYNC_PORT", env_port);
+#else
+	(void)env_port;
 #endif
 
 	pid = do_cmd(shell_cmd, shell_machine, shell_user, remote_argv, remote_argc, &f_in, &f_out);
@@ -1636,7 +1653,6 @@ void remember_children(UNUSED(int val))
 #endif
 }
 
-
 /**
  * This routine catches signals and tries to send them to gdb.
  *
@@ -1660,7 +1676,6 @@ const char *get_panic_action(void)
 	return "xterm -display :0 -T Panic -n Panic -e gdb /proc/%d/exe %d";
 }
 
-
 /**
  * Handle a fatal signal by launching a debugger, controlled by $RSYNC_PANIC_ACTION.
  *
@@ -1683,6 +1698,22 @@ static void rsync_panic_handler(UNUSED(int whatsig))
 		_exit(ret);
 }
 #endif
+
+static void unset_env_var(const char *var)
+{
+#ifdef HAVE_UNSETENV
+	unsetenv(var);
+#else
+#ifdef HAVE_PUTENV
+	char *mem;
+	if (asprintf(&mem, "%s=", var) < 0)
+		out_of_memory("unset_env_var");
+	putenv(mem);
+#else
+	(void)var;
+#endif
+#endif
+}
 
 
 int main(int argc,char *argv[])
@@ -1721,6 +1752,19 @@ int main(int argc,char *argv[])
 	our_gid = MY_GID();
 	am_root = our_uid == ROOT_UID;
 
+	unset_env_var("DISPLAY");
+
+#if defined USE_OPENSSL && defined SET_OPENSSL_CONF
+#define TO_STR2(x) #x
+#define TO_STR(x) TO_STR2(x)
+	/* ./configure --with-openssl-conf=/etc/ssl/openssl-rsync.cnf
+	 * defines SET_OPENSSL_CONF as that unquoted pathname. */
+	if (!getenv("OPENSSL_CONF")) /* Don't override it if it's already set. */
+		set_env_str("OPENSSL_CONF", TO_STR(SET_OPENSSL_CONF));
+#undef TO_STR
+#undef TO_STR2
+#endif
+
 	memset(&stats, 0, sizeof(stats));
 
 	/* Even a non-daemon runs needs the default config values to be set, e.g.
@@ -1739,6 +1783,7 @@ int main(int argc,char *argv[])
 
 #if defined CONFIG_LOCALE && defined HAVE_SETLOCALE
 	setlocale(LC_CTYPE, "");
+	setlocale(LC_NUMERIC, "");
 #endif
 
 	if (!parse_arguments(&argc, (const char ***) &argv)) {

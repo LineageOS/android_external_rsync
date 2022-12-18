@@ -3,7 +3,7 @@
  *
  * Copyright (C) 1996 Andrew Tridgell
  * Copyright (C) 1996 Paul Mackerras
- * Copyright (C) 2003-2020 Wayne Davison
+ * Copyright (C) 2003-2022 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -25,6 +25,7 @@
 extern int do_xfers;
 extern int am_server;
 extern int am_daemon;
+extern int local_server;
 extern int inc_recurse;
 extern int log_before_transfer;
 extern int stdout_format_has_i;
@@ -35,7 +36,9 @@ extern int append_mode;
 extern int copy_links;
 extern int io_error;
 extern int flist_eof;
+extern int whole_file;
 extern int allowed_lull;
+extern int copy_devices;
 extern int preserve_xattrs;
 extern int protocol_version;
 extern int remove_source_files;
@@ -49,6 +52,7 @@ extern int file_old_total;
 extern BOOL want_progress_now;
 extern struct stats stats;
 extern struct file_list *cur_flist, *first_flist, *dir_flist;
+extern char num_dev_ino_buf[4 + 8 + 8];
 
 BOOL extra_flist_sending_enabled;
 
@@ -142,6 +146,13 @@ void successful_send(int ndx)
 		goto failed;
 	}
 
+	if (local_server
+	 && (int64)st.st_dev == IVAL64(num_dev_ino_buf, 4)
+	 && (int64)st.st_ino == IVAL64(num_dev_ino_buf, 4 + 8)) {
+		rprintf(FERROR_XFER, "ERROR: Skipping sender remove of destination file: %s\n", fname);
+		return;
+	}
+
 	if (st.st_size != F_LENGTH(file) || st.st_mtime != file->modtime
 #ifdef ST_MTIME_NSEC
 	 || (NSEC_BUMP(file) && (uint32)st.ST_MTIME_NSEC != F_MOD_NSEC(file))
@@ -203,6 +214,9 @@ void send_files(int f_in, int f_out)
 
 	if (DEBUG_GTE(SEND, 1))
 		rprintf(FINFO, "send_files starting\n");
+
+	if (whole_file < 0)
+		whole_file = 0;
 
 	progress_init();
 
@@ -360,6 +374,25 @@ void send_files(int f_in, int f_out)
 			free_sums(s);
 			close(fd);
 			exit_cleanup(RERR_FILEIO);
+		}
+
+		if (IS_DEVICE(st.st_mode)) {
+			if (!copy_devices) {
+				rprintf(FERROR, "attempt to copy device contents without --copy-devices\n");
+				exit_cleanup(RERR_PROTOCOL);
+			}
+			if (st.st_size == 0)
+				st.st_size = get_device_size(fd, fname);
+		}
+
+		if (append_mode > 0 && st.st_size < F_LENGTH(file)) {
+			rprintf(FWARNING, "skipped diminished file: %s\n",
+				full_fname(fname));
+			free_sums(s);
+			close(fd);
+			if (protocol_version >= 30)
+				send_msg_int(MSG_NO_SEND, ndx);
+			continue;
 		}
 
 		if (st.st_size) {

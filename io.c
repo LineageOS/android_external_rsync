@@ -4,7 +4,7 @@
  * Copyright (C) 1996-2001 Andrew Tridgell
  * Copyright (C) 1996 Paul Mackerras
  * Copyright (C) 2001, 2002 Martin Pool <mbp@samba.org>
- * Copyright (C) 2003-2020 Wayne Davison
+ * Copyright (C) 2003-2022 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -41,6 +41,7 @@ extern int am_server;
 extern int am_sender;
 extern int am_receiver;
 extern int am_generator;
+extern int local_server;
 extern int msgs2stderr;
 extern int inc_recurse;
 extern int io_error;
@@ -83,6 +84,8 @@ int sock_f_out = -1;
 
 int64 total_data_read = 0;
 int64 total_data_written = 0;
+
+char num_dev_ino_buf[4 + 8 + 8];
 
 static struct {
 	xbuf in, out, msg;
@@ -264,15 +267,18 @@ static size_t safe_read(int fd, char *buf, size_t len)
 			rprintf(FINFO, "select exception on fd %d\n", fd); */
 
 		if (FD_ISSET(fd, &r_fds)) {
-			int n = read(fd, buf + got, len - got);
-			if (DEBUG_GTE(IO, 2))
-				rprintf(FINFO, "[%s] safe_read(%d)=%ld\n", who_am_i(), fd, (long)n);
+			ssize_t n = read(fd, buf + got, len - got);
+			if (DEBUG_GTE(IO, 2)) {
+				rprintf(FINFO, "[%s] safe_read(%d)=%" SIZE_T_FMT_MOD "d\n",
+					who_am_i(), fd, (SIZE_T_FMT_CAST)n);
+			}
 			if (n == 0)
 				break;
 			if (n < 0) {
 				if (errno == EINTR)
 					continue;
-				rsyserr(FERROR, errno, "safe_read failed to read %ld bytes", (long)len);
+				rsyserr(FERROR, errno, "safe_read failed to read %" SIZE_T_FMT_MOD "d bytes",
+					(SIZE_T_FMT_CAST)len);
 				exit_cleanup(RERR_STREAMIO);
 			}
 			if ((got += (size_t)n) == len)
@@ -304,7 +310,7 @@ static const char *what_fd_is(int fd)
  * is not used on the socket except very early in the transfer. */
 static void safe_write(int fd, const char *buf, size_t len)
 {
-	int n;
+	ssize_t n;
 
 	assert(fd != iobuf.out_fd);
 
@@ -315,8 +321,8 @@ static void safe_write(int fd, const char *buf, size_t len)
 		if (errno != EINTR && errno != EWOULDBLOCK && errno != EAGAIN) {
 		  write_failed:
 			rsyserr(FERROR, errno,
-				"safe_write failed to write %ld bytes to %s",
-				(long)len, what_fd_is(fd));
+				"safe_write failed to write %" SIZE_T_FMT_MOD "d bytes to %s",
+				(SIZE_T_FMT_CAST)len, what_fd_is(fd));
 			exit_cleanup(RERR_STREAMIO);
 		}
 	} else {
@@ -362,7 +368,7 @@ static void safe_write(int fd, const char *buf, size_t len)
  * a chunk of data and put it into the output buffer. */
 static void forward_filesfrom_data(void)
 {
-	int len;
+	ssize_t len;
 
 	len = read(ff_forward_fd, ff_xb.buf + ff_xb.len, ff_xb.size - ff_xb.len);
 	if (len <= 0) {
@@ -373,12 +379,15 @@ static void forward_filesfrom_data(void)
 			free_xbuf(&ff_xb);
 			if (ff_reenable_multiplex >= 0)
 				io_start_multiplex_out(ff_reenable_multiplex);
+			free_implied_include_partial_string();
 		}
 		return;
 	}
 
-	if (DEBUG_GTE(IO, 2))
-		rprintf(FINFO, "[%s] files-from read=%ld\n", who_am_i(), (long)len);
+	if (DEBUG_GTE(IO, 2)) {
+		rprintf(FINFO, "[%s] files-from read=%" SIZE_T_FMT_MOD "d\n",
+			who_am_i(), (SIZE_T_FMT_CAST)len);
+	}
 
 #ifdef ICONV_OPTION
 	len += ff_xb.len;
@@ -414,6 +423,7 @@ static void forward_filesfrom_data(void)
 		while (s != eob) {
 			if (*s++ == '\0') {
 				ff_xb.len = s - sob - 1;
+				add_implied_include(sob, 0);
 				if (iconvbufs(ic_send, &ff_xb, &iobuf.out, flags) < 0)
 					exit_cleanup(RERR_PROTOCOL); /* impossible? */
 				write_buf(iobuf.out_fd, s-1, 1); /* Send the '\0'. */
@@ -429,6 +439,7 @@ static void forward_filesfrom_data(void)
 			ff_lastchar = '\0';
 		else {
 			/* Handle a partial string specially, saving any incomplete chars. */
+			implied_include_partial_string(sob, s);
 			flags &= ~ICB_INCLUDE_INCOMPLETE;
 			if (iconvbufs(ic_send, &ff_xb, &iobuf.out, flags) < 0) {
 				if (errno == E2BIG)
@@ -445,13 +456,17 @@ static void forward_filesfrom_data(void)
 		char *f = ff_xb.buf + ff_xb.pos;
 		char *t = ff_xb.buf;
 		char *eob = f + len;
+		char *cur = t;
 		/* Eliminate any multi-'\0' runs. */
 		while (f != eob) {
 			if (!(*t++ = *f++)) {
+				add_implied_include(cur, 0);
+				cur = t;
 				while (f != eob && *f == '\0')
 					f++;
 			}
 		}
+		implied_include_partial_string(cur, t);
 		ff_lastchar = f[-1];
 		if ((len = t - ff_xb.buf) != 0) {
 			/* This will not circle back to perform_io() because we only get
@@ -562,52 +577,59 @@ static char *perform_io(size_t needed, int flags)
 	case PIO_NEED_INPUT:
 		/* We never resize the circular input buffer. */
 		if (iobuf.in.size < needed) {
-			rprintf(FERROR, "need to read %ld bytes, iobuf.in.buf is only %ld bytes.\n",
-				(long)needed, (long)iobuf.in.size);
+			rprintf(FERROR, "need to read %" SIZE_T_FMT_MOD "d bytes,"
+					" iobuf.in.buf is only %" SIZE_T_FMT_MOD "d bytes.\n",
+				(SIZE_T_FMT_CAST)needed, (SIZE_T_FMT_CAST)iobuf.in.size);
 			exit_cleanup(RERR_PROTOCOL);
 		}
 
 		if (msgs2stderr == 1 && DEBUG_GTE(IO, 3)) {
-			rprintf(FINFO, "[%s] perform_io(%ld, %sinput)\n",
-				who_am_i(), (long)needed, flags & PIO_CONSUME_INPUT ? "consume&" : "");
+			rprintf(FINFO, "[%s] perform_io(%" SIZE_T_FMT_MOD "d, %sinput)\n",
+				who_am_i(), (SIZE_T_FMT_CAST)needed, flags & PIO_CONSUME_INPUT ? "consume&" : "");
 		}
 		break;
 
 	case PIO_NEED_OUTROOM:
 		/* We never resize the circular output buffer. */
 		if (iobuf.out.size - iobuf.out_empty_len < needed) {
-			fprintf(stderr, "need to write %ld bytes, iobuf.out.buf is only %ld bytes.\n",
-				(long)needed, (long)(iobuf.out.size - iobuf.out_empty_len));
+			fprintf(stderr, "need to write %" SIZE_T_FMT_MOD "d bytes,"
+					" iobuf.out.buf is only %" SIZE_T_FMT_MOD "d bytes.\n",
+				(SIZE_T_FMT_CAST)needed, (SIZE_T_FMT_CAST)(iobuf.out.size - iobuf.out_empty_len));
 			exit_cleanup(RERR_PROTOCOL);
 		}
 
 		if (msgs2stderr == 1 && DEBUG_GTE(IO, 3)) {
-			rprintf(FINFO, "[%s] perform_io(%ld, outroom) needs to flush %ld\n",
-				who_am_i(), (long)needed,
+			rprintf(FINFO, "[%s] perform_io(%" SIZE_T_FMT_MOD "d,"
+				       " outroom) needs to flush %" SIZE_T_FMT_MOD "d\n",
+				who_am_i(), (SIZE_T_FMT_CAST)needed,
 				iobuf.out.len + needed > iobuf.out.size
-				? (long)(iobuf.out.len + needed - iobuf.out.size) : 0L);
+				? (SIZE_T_FMT_CAST)(iobuf.out.len + needed - iobuf.out.size) : (SIZE_T_FMT_CAST)0);
 		}
 		break;
 
 	case PIO_NEED_MSGROOM:
 		/* We never resize the circular message buffer. */
 		if (iobuf.msg.size < needed) {
-			fprintf(stderr, "need to write %ld bytes, iobuf.msg.buf is only %ld bytes.\n",
-				(long)needed, (long)iobuf.msg.size);
+			fprintf(stderr, "need to write %" SIZE_T_FMT_MOD "d bytes,"
+					" iobuf.msg.buf is only %" SIZE_T_FMT_MOD "d bytes.\n",
+				(SIZE_T_FMT_CAST)needed, (SIZE_T_FMT_CAST)iobuf.msg.size);
 			exit_cleanup(RERR_PROTOCOL);
 		}
 
 		if (msgs2stderr == 1 && DEBUG_GTE(IO, 3)) {
-			rprintf(FINFO, "[%s] perform_io(%ld, msgroom) needs to flush %ld\n",
-				who_am_i(), (long)needed,
+			rprintf(FINFO, "[%s] perform_io(%" SIZE_T_FMT_MOD "d,"
+				       " msgroom) needs to flush %" SIZE_T_FMT_MOD "d\n",
+				who_am_i(), (SIZE_T_FMT_CAST)needed,
 				iobuf.msg.len + needed > iobuf.msg.size
-				? (long)(iobuf.msg.len + needed - iobuf.msg.size) : 0L);
+				? (SIZE_T_FMT_CAST)(iobuf.msg.len + needed - iobuf.msg.size) : (SIZE_T_FMT_CAST)0);
 		}
 		break;
 
 	case 0:
-		if (msgs2stderr == 1 && DEBUG_GTE(IO, 3))
-			rprintf(FINFO, "[%s] perform_io(%ld, %d)\n", who_am_i(), (long)needed, flags);
+		if (msgs2stderr == 1 && DEBUG_GTE(IO, 3)) {
+			rprintf(FINFO, "[%s] perform_io(%" SIZE_T_FMT_MOD "d, %d)\n",
+				who_am_i(), (SIZE_T_FMT_CAST)needed, flags);
+		}
 		break;
 
 	default:
@@ -665,8 +687,8 @@ static char *perform_io(size_t needed, int flags)
 					      ((MPLEX_BASE + (int)MSG_DATA)<<24) + iobuf.out.len - 4);
 
 					if (msgs2stderr == 1 && DEBUG_GTE(IO, 1)) {
-						rprintf(FINFO, "[%s] send_msg(%d, %ld)\n",
-							who_am_i(), (int)MSG_DATA, (long)iobuf.out.len - 4);
+						rprintf(FINFO, "[%s] send_msg(%d, %" SIZE_T_FMT_MOD "d)\n",
+							who_am_i(), (int)MSG_DATA, (SIZE_T_FMT_CAST)iobuf.out.len - 4);
 					}
 
 					/* reserve room for the next MSG_DATA header */
@@ -757,7 +779,7 @@ static char *perform_io(size_t needed, int flags)
 
 		if (iobuf.in_fd >= 0 && FD_ISSET(iobuf.in_fd, &r_fds)) {
 			size_t len, pos = iobuf.in.pos + iobuf.in.len;
-			int n;
+			ssize_t n;
 			if (pos >= iobuf.in.size) {
 				pos -= iobuf.in.size;
 				len = iobuf.in.size - iobuf.in.len;
@@ -784,15 +806,13 @@ static char *perform_io(size_t needed, int flags)
 					exit_cleanup(RERR_SOCKETIO);
 				}
 			}
-			if (msgs2stderr == 1 && DEBUG_GTE(IO, 2))
-				rprintf(FINFO, "[%s] recv=%ld\n", who_am_i(), (long)n);
+			if (msgs2stderr == 1 && DEBUG_GTE(IO, 2)) {
+				rprintf(FINFO, "[%s] recv=%" SIZE_T_FMT_MOD "d\n",
+					who_am_i(), (SIZE_T_FMT_CAST)n);
+			}
 
-			if (io_timeout || stop_at_utime) {
+			if (io_timeout) {
 				last_io_in = time(NULL);
-				if (stop_at_utime && last_io_in >= stop_at_utime) {
-					rprintf(FERROR, "stopping at requested limit\n");
-					exit_cleanup(RERR_TIMEOUT);
-				}
 				if (io_timeout && flags & PIO_NEED_INPUT)
 					maybe_send_keepalive(last_io_in, 0);
 			}
@@ -801,9 +821,14 @@ static char *perform_io(size_t needed, int flags)
 			iobuf.in.len += n;
 		}
 
+		if (stop_at_utime && time(NULL) >= stop_at_utime) {
+			rprintf(FERROR, "stopping at requested limit\n");
+			exit_cleanup(RERR_TIMEOUT);
+		}
+
 		if (out && FD_ISSET(iobuf.out_fd, &w_fds)) {
 			size_t len = iobuf.raw_flushing_ends_before ? iobuf.raw_flushing_ends_before - out->pos : out->len;
-			int n;
+			ssize_t n;
 
 			if (bwlimit_writemax && len > bwlimit_writemax)
 				len = bwlimit_writemax;
@@ -824,8 +849,8 @@ static char *perform_io(size_t needed, int flags)
 				}
 			}
 			if (msgs2stderr == 1 && DEBUG_GTE(IO, 2)) {
-				rprintf(FINFO, "[%s] %s sent=%ld\n",
-					who_am_i(), out == &iobuf.out ? "out" : "msg", (long)n);
+				rprintf(FINFO, "[%s] %s sent=%" SIZE_T_FMT_MOD "d\n",
+					who_am_i(), out == &iobuf.out ? "out" : "msg", (SIZE_T_FMT_CAST)n);
 			}
 
 			if (io_timeout)
@@ -945,8 +970,10 @@ int send_msg(enum msgcode code, const char *buf, size_t len, int convert)
 	if (!OUT_MULTIPLEXED)
 		return 0;
 
-	if (want_debug)
-		rprintf(FINFO, "[%s] send_msg(%d, %ld)\n", who_am_i(), (int)code, (long)len);
+	if (want_debug) {
+		rprintf(FINFO, "[%s] send_msg(%d, %" SIZE_T_FMT_MOD "d)\n",
+			who_am_i(), (int)code, (SIZE_T_FMT_CAST)len);
+	}
 
 	/* When checking for enough free space for this message, we need to
 	 * make sure that there is space for the 4-byte header, plus we'll
@@ -962,9 +989,9 @@ int send_msg(enum msgcode code, const char *buf, size_t len, int convert)
 #endif
 		needed = len + 4 + 3;
 	if (iobuf.msg.len + needed > iobuf.msg.size) {
-		if (!am_receiver)
+		if (am_sender)
 			perform_io(needed, PIO_NEED_MSGROOM);
-		else { /* We allow the receiver to increase their iobuf.msg size to avoid a deadlock. */
+		else { /* We sometimes allow the iobuf.msg size to increase to avoid a deadlock. */
 			size_t old_size = iobuf.msg.size;
 			restore_iobuf_size(&iobuf.msg);
 			realloc_xbuf(&iobuf.msg, iobuf.msg.size * 2);
@@ -1021,8 +1048,10 @@ int send_msg(enum msgcode code, const char *buf, size_t len, int convert)
 
 	SIVAL(hdr, 0, ((MPLEX_BASE + (int)code)<<24) + len);
 
-	if (want_debug && convert > 0)
-		rprintf(FINFO, "[%s] converted msg len=%ld\n", who_am_i(), (long)len);
+	if (want_debug && convert > 0) {
+		rprintf(FINFO, "[%s] converted msg len=%" SIZE_T_FMT_MOD "d\n",
+			who_am_i(), (SIZE_T_FMT_CAST)len);
+	}
 
 	return 1;
 }
@@ -1036,6 +1065,24 @@ void send_msg_int(enum msgcode code, int num)
 
 	SIVAL(numbuf, 0, num);
 	send_msg(code, numbuf, 4, -1);
+}
+
+void send_msg_success(const char *fname, int num)
+{
+	if (local_server) {
+		STRUCT_STAT st;
+
+		if (DEBUG_GTE(IO, 1))
+			rprintf(FINFO, "[%s] send_msg_success(%d)\n", who_am_i(), num);
+
+		if (stat(fname, &st) < 0)
+			memset(&st, 0, sizeof (STRUCT_STAT));
+		SIVAL(num_dev_ino_buf, 0, num);
+		SIVAL64(num_dev_ino_buf, 4, st.st_dev);
+		SIVAL64(num_dev_ino_buf, 4+8, st.st_ino);
+		send_msg(MSG_SUCCESS, num_dev_ino_buf, sizeof num_dev_ino_buf, -1);
+	} else
+		send_msg_int(MSG_SUCCESS, num);
 }
 
 static void got_flist_entry_status(enum festatus status, int ndx)
@@ -1052,8 +1099,12 @@ static void got_flist_entry_status(enum festatus status, int ndx)
 
 	switch (status) {
 	case FES_SUCCESS:
-		if (remove_source_files)
-			send_msg_int(MSG_SUCCESS, ndx);
+		if (remove_source_files) {
+			if (local_server)
+				send_msg(MSG_SUCCESS, num_dev_ino_buf, sizeof num_dev_ino_buf, -1);
+			else
+				send_msg_int(MSG_SUCCESS, ndx);
+		}
 		/* FALL THROUGH */
 	case FES_NO_SEND:
 #ifdef SUPPORT_HARD_LINKS
@@ -1436,8 +1487,10 @@ static void read_a_msg(void)
 	msg_bytes = tag & 0xFFFFFF;
 	tag = (tag >> 24) - MPLEX_BASE;
 
-	if (msgs2stderr == 1 && DEBUG_GTE(IO, 1))
-		rprintf(FINFO, "[%s] got msg=%d, len=%ld\n", who_am_i(), (int)tag, (long)msg_bytes);
+	if (msgs2stderr == 1 && DEBUG_GTE(IO, 1)) {
+		rprintf(FINFO, "[%s] got msg=%d, len=%" SIZE_T_FMT_MOD "d\n",
+			who_am_i(), (int)tag, (SIZE_T_FMT_CAST)msg_bytes);
+	}
 
 	switch (tag) {
 	case MSG_DATA:
@@ -1546,14 +1599,15 @@ static void read_a_msg(void)
 		}
 		break;
 	case MSG_SUCCESS:
-		if (msg_bytes != 4) {
+		if (msg_bytes != (local_server ? 4+8+8 : 4)) {
 		  invalid_msg:
 			rprintf(FERROR, "invalid multi-message %d:%lu [%s%s]\n",
 				tag, (unsigned long)msg_bytes, who_am_i(),
 				inc_recurse ? "/inc" : "");
 			exit_cleanup(RERR_STREAMIO);
 		}
-		val = raw_read_int();
+		raw_read_buf(num_dev_ino_buf, msg_bytes);
+		val = IVAL(num_dev_ino_buf, 0);
 		iobuf.in_multiplexed = 1;
 		if (am_generator)
 			got_flist_entry_status(FES_SUCCESS, val);
@@ -1613,8 +1667,10 @@ static void read_a_msg(void)
 		else
 			goto invalid_msg;
 		iobuf.in_multiplexed = 1;
-		if (DEBUG_GTE(EXIT, 3))
-			rprintf(FINFO, "[%s] got MSG_ERROR_EXIT with %ld bytes\n", who_am_i(), (long)msg_bytes);
+		if (DEBUG_GTE(EXIT, 3)) {
+			rprintf(FINFO, "[%s] got MSG_ERROR_EXIT with %" SIZE_T_FMT_MOD "d bytes\n",
+					who_am_i(), (SIZE_T_FMT_CAST)msg_bytes);
+		}
 		if (msg_bytes == 0) {
 			if (!am_sender && !am_generator) {
 				if (DEBUG_GTE(EXIT, 3)) {
@@ -1728,6 +1784,13 @@ int32 read_int(int f)
 	return num;
 }
 
+uint32 read_uint(int f)
+{
+	char b[4];
+	read_buf(f, b, 4);
+	return IVAL(b, 0);
+}
+
 int32 read_varint(int f)
 {
 	union {
@@ -1820,6 +1883,7 @@ int64 read_longint(int f)
 #endif
 }
 
+/* Debugging note: this will be named read_buf_() when using an external zlib. */
 void read_buf(int f, char *buf, size_t len)
 {
 	if (f != iobuf.in_fd) {
