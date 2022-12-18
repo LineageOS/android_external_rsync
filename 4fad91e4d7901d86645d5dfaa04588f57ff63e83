@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "9a6cc2b7_a84e3b1b",
+        "filename": "/PATCHSET_LEVEL",
+        "patchSetId": 1
+      },
+      "lineNbr": 0,
+      "author": {
+        "id": 17945
+      },
+      "writtenOn": "2022-12-18T16:42:29Z",
+      "side": 1,
+      "message": "Fork with the merge history: https://github.com/DroidFreak32/android_external_rsync",
+      "revId": "4fad91e4d7901d86645d5dfaa04588f57ff63e83",
+      "serverId": "1ec6b3db-b2c1-4fa4-84a2-4c7efe89ba71"
+    }
+  ]
+}
