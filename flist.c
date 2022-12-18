@@ -4,7 +4,7 @@
  * Copyright (C) 1996 Andrew Tridgell
  * Copyright (C) 1996 Paul Mackerras
  * Copyright (C) 2001, 2002 Martin Pool <mbp@samba.org>
- * Copyright (C) 2002-2020 Wayne Davison
+ * Copyright (C) 2002-2022 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -33,7 +33,6 @@ extern int am_sender;
 extern int am_generator;
 extern int inc_recurse;
 extern int always_checksum;
-extern int checksum_type;
 extern int module_id;
 extern int ignore_errors;
 extern int numeric_ids;
@@ -43,6 +42,7 @@ extern int use_qsort;
 extern int xfer_dirs;
 extern int filesfrom_fd;
 extern int one_file_system;
+extern int copy_devices;
 extern int copy_dirlinks;
 extern int preserve_uid;
 extern int preserve_gid;
@@ -72,18 +72,20 @@ extern int need_unsorted_flist;
 extern int sender_symlink_iconv;
 extern int output_needs_newline;
 extern int sender_keeps_checksum;
+extern int trust_sender_filter;
 extern int unsort_ndx;
 extern uid_t our_uid;
 extern struct stats stats;
 extern char *filesfrom_host;
 extern char *usermap, *groupmap;
 
+extern struct name_num_item *file_sum_nni;
+
 extern char curr_dir[MAXPATHLEN];
 
 extern struct chmod_mode_struct *chmod_modes;
 
-extern filter_rule_list filter_list;
-extern filter_rule_list daemon_filter_list;
+extern filter_rule_list filter_list, implied_filter_list, daemon_filter_list;
 
 #ifdef ICONV_OPTION
 extern int filesfrom_convert;
@@ -144,7 +146,8 @@ void init_flist(void)
 		rprintf(FINFO, "FILE_STRUCT_LEN=%d, EXTRA_LEN=%d\n",
 			(int)FILE_STRUCT_LEN, (int)EXTRA_LEN);
 	}
-	flist_csum_len = csum_len_for_type(checksum_type, 1);
+	/* Note that this isn't identical to file_sum_len in the case of CSUM_MD4_ARCHAIC: */
+	flist_csum_len = csum_len_for_type(file_sum_nni->num, 1);
 
 	show_filelist_progress = INFO_GTE(FLIST, 1) && xfer_dirs && !am_server && !inc_recurse;
 }
@@ -295,6 +298,8 @@ static void flist_expand(struct file_list *flist, int extra)
 		flist->malloced = FLIST_START;
 	else if (flist->malloced >= FLIST_LINEAR)
 		flist->malloced += FLIST_LINEAR;
+	else if (flist->malloced < FLIST_START_LARGE/16)
+		flist->malloced *= 4;
 	else
 		flist->malloced *= 2;
 
@@ -305,7 +310,7 @@ static void flist_expand(struct file_list *flist, int extra)
 
 	new_ptr = realloc_array(flist->files, struct file_struct *, flist->malloced);
 
-	if (DEBUG_GTE(FLIST, 1) && flist->malloced != FLIST_START) {
+	if (DEBUG_GTE(FLIST, 1) && flist->files) {
 		rprintf(FCLIENT, "[%s] expand file_list pointer array to %s bytes, did%s move\n",
 		    who_am_i(),
 		    big_num(sizeof flist->files[0] * flist->malloced),
@@ -698,6 +703,7 @@ static struct file_struct *recv_file_entry(int f, struct file_list *flist, int x
 	int alloc_len, basename_len, linkname_len;
 	int extra_len = file_extra_cnt * EXTRA_LEN;
 	int first_hlink_ndx = -1;
+	char real_ISREG_entry;
 	int64 file_length;
 #ifdef CAN_SET_NSEC
 	uint32 modtime_nsec;
@@ -750,7 +756,7 @@ static struct file_struct *recv_file_entry(int f, struct file_list *flist, int x
 	if (*thisname
 	 && (clean_fname(thisname, CFN_REFUSE_DOT_DOT_DIRS) < 0 || (!relative_paths && *thisname == '/'))) {
 		rprintf(FERROR, "ABORTING due to unsafe pathname from sender: %s\n", thisname);
-		exit_cleanup(RERR_PROTOCOL);
+		exit_cleanup(RERR_UNSUPPORTED);
 	}
 
 	if (sanitize_paths)
@@ -812,6 +818,7 @@ static struct file_struct *recv_file_entry(int f, struct file_list *flist, int x
 				linkname_len = strlen(F_SYMLINK(first)) + 1;
 			else
 				linkname_len = 0;
+			real_ISREG_entry = S_ISREG(mode) ? 1 : 0;
 			goto create_object;
 		}
 	}
@@ -829,7 +836,7 @@ static struct file_struct *recv_file_entry(int f, struct file_list *flist, int x
 			}
 #endif
 		} else
-			modtime = read_int(f);
+			modtime = read_uint(f);
 	}
 	if (xflags & XMIT_MOD_NSEC)
 #ifndef CAN_SET_NSEC
@@ -939,10 +946,20 @@ static struct file_struct *recv_file_entry(int f, struct file_list *flist, int x
 #endif
 		linkname_len = 0;
 
+	if (copy_devices && IS_DEVICE(mode)) {
+		/* This is impossible in the official release, but some pre-release patches
+		 * didn't convert the device into a file before sending, so we'll do it here
+		 * (even though the length is typically 0 and any checksum data is zeros). */
+		mode = S_IFREG | (mode & ACCESSPERMS);
+		modtime = time(NULL); /* The mtime on the device is not up-to-date, so set it to "now". */
+		real_ISREG_entry = 0;
+	} else
+		real_ISREG_entry = S_ISREG(mode) ? 1 : 0;
+
 #ifdef SUPPORT_HARD_LINKS
   create_object:
 	if (preserve_hard_links) {
-		if (protocol_version < 28 && S_ISREG(mode))
+		if (protocol_version < 28 && real_ISREG_entry)
 			xflags |= XMIT_HLINKED;
 		if (xflags & XMIT_HLINKED)
 			extra_len += (inc_recurse+1) * EXTRA_LEN;
@@ -969,6 +986,19 @@ static struct file_struct *recv_file_entry(int f, struct file_list *flist, int x
 	if (file_length < 0) {
 		rprintf(FERROR, "Offset underflow: file-length is negative\n");
 		exit_cleanup(RERR_UNSUPPORTED);
+	}
+
+	if (*thisname == '/' ? thisname[1] != '.' || thisname[2] != '\0' : *thisname != '.' || thisname[1] != '\0') {
+		int filt_flags = S_ISDIR(mode) ? NAME_IS_DIR : NAME_IS_FILE;
+		if (!trust_sender_filter /* a per-dir filter rule means we must trust the sender's filtering */
+		 && filter_list.head && check_server_filter(&filter_list, FINFO, thisname, filt_flags) < 0) {
+			rprintf(FERROR, "ERROR: rejecting excluded file-list name: %s\n", thisname);
+			exit_cleanup(RERR_UNSUPPORTED);
+		}
+		if (implied_filter_list.head && check_filter(&implied_filter_list, FINFO, thisname, filt_flags) <= 0) {
+			rprintf(FERROR, "ERROR: rejecting unrequested file-list name: %s\n", thisname);
+			exit_cleanup(RERR_UNSUPPORTED);
+		}
 	}
 
 	if (inc_recurse && S_ISDIR(mode)) {
@@ -1158,8 +1188,8 @@ static struct file_struct *recv_file_entry(int f, struct file_list *flist, int x
 	}
 #endif
 
-	if (always_checksum && (S_ISREG(mode) || protocol_version < 28)) {
-		if (S_ISREG(mode))
+	if (always_checksum && (real_ISREG_entry || protocol_version < 28)) {
+		if (real_ISREG_entry)
 			bp = F_SUM(file);
 		else {
 			/* Prior to 28, we get a useless set of nulls. */
@@ -1358,6 +1388,18 @@ struct file_struct *make_file(const char *fname, struct file_list *flist,
 	linkname_len = 0;
 #endif
 
+	if (copy_devices && am_sender && IS_DEVICE(st.st_mode)) {
+		if (st.st_size == 0) {
+			int fd = do_open(fname, O_RDONLY, 0);
+			if (fd >= 0) {
+				st.st_size = get_device_size(fd, fname);
+				close(fd);
+			}
+		}
+		st.st_mode = S_IFREG | (st.st_mode & ACCESSPERMS);
+		st.st_mtime = time(NULL); /* The mtime on the device is not up-to-date, so set it to "now". */
+	}
+
 #ifdef ST_MTIME_NSEC
 	if (st.ST_MTIME_NSEC && protocol_version >= 31)
 		extra_len += EXTRA_LEN;
@@ -1438,7 +1480,7 @@ struct file_struct *make_file(const char *fname, struct file_list *flist,
 		F_ATIME(file) = st.st_atime;
 #ifdef SUPPORT_CRTIMES
 	if (crtimes_ndx)
-		F_CRTIME(file) = get_create_time(fname);
+		F_CRTIME(file) = get_create_time(fname, &st);
 #endif
 
 	if (basename != thisname)
@@ -2186,8 +2228,10 @@ struct file_list *send_file_list(int f, int argc, char *argv[])
 #endif
 
 	flist = cur_flist = flist_new(0, "send_file_list");
+	flist_expand(flist, FLIST_START_LARGE);
 	if (inc_recurse) {
 		dir_flist = flist_new(FLIST_TEMP, "send_file_list");
+		flist_expand(dir_flist, FLIST_START_LARGE);
 		flags |= FLAG_DIVERT_DIRS;
 	} else
 		dir_flist = cur_flist;
@@ -2541,10 +2585,13 @@ struct file_list *recv_file_list(int f, int dir_ndx)
 #endif
 
 	flist = flist_new(0, "recv_file_list");
+	flist_expand(flist, FLIST_START_LARGE);
 
 	if (inc_recurse) {
-		if (flist->ndx_start == 1)
+		if (flist->ndx_start == 1) {
 			dir_flist = flist_new(FLIST_TEMP, "recv_file_list");
+			flist_expand(dir_flist, FLIST_START_LARGE);
+		}
 		dstart = dir_flist->used;
 	} else {
 		dir_flist = flist;
@@ -2595,7 +2642,7 @@ struct file_list *recv_file_list(int f, int dir_ndx)
 					rprintf(FERROR,
 						"ABORTING due to invalid path from sender: %s/%s\n",
 						cur_dir, file->basename);
-					exit_cleanup(RERR_PROTOCOL);
+					exit_cleanup(RERR_UNSUPPORTED);
 				}
 				good_dirname = cur_dir;
 			}
