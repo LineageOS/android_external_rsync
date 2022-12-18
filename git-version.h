@@ -1,1 +1,1 @@
-#define RSYNC_GITVER RSYNC_VERSION
+#define RSYNC_GITVER "v3.2.7"

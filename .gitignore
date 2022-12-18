@@ -3,6 +3,7 @@
 dummy
 ID
 Makefile
+git-version.h
 Makefile.old
 configure.sh
 configure.sh.old
