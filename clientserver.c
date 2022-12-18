@@ -3,7 +3,7 @@
  *
  * Copyright (C) 1998-2001 Andrew Tridgell <tridge@samba.org>
  * Copyright (C) 2001-2002 Martin Pool <mbp@samba.org>
- * Copyright (C) 2002-2020 Wayne Davison
+ * Copyright (C) 2002-2022 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -47,6 +47,7 @@ extern int protocol_version;
 extern int io_timeout;
 extern int no_detach;
 extern int write_batch;
+extern int old_style_args;
 extern int default_af_hint;
 extern int logfile_format_has_i;
 extern int logfile_format_has_o_or_i;
@@ -66,6 +67,7 @@ extern uid_t our_uid;
 extern gid_t our_gid;
 
 char *auth_user;
+char *daemon_auth_choices;
 int read_only = 0;
 int module_id = -1;
 int pid_file_fd = -1;
@@ -148,13 +150,9 @@ int start_socket_client(char *host, int remote_argc, char *remote_argv[],
 static int exchange_protocols(int f_in, int f_out, char *buf, size_t bufsiz, int am_client)
 {
 	int remote_sub = -1;
-#if SUBPROTOCOL_VERSION != 0
-	int our_sub = protocol_version < PROTOCOL_VERSION ? 0 : SUBPROTOCOL_VERSION;
-#else
-	int our_sub = 0;
-#endif
+	int our_sub = get_subprotocol_version();
 
-	io_printf(f_out, "@RSYNCD: %d.%d\n", protocol_version, our_sub);
+	output_daemon_greeting(f_out, am_client);
 	if (!am_client) {
 		char *motd = lp_motd_file();
 		if (motd && *motd) {
@@ -186,14 +184,28 @@ static int exchange_protocols(int f_in, int f_out, char *buf, size_t bufsiz, int
 	}
 
 	if (remote_sub < 0) {
-		if (remote_protocol == 30) {
+		if (remote_protocol >= 30) {
 			if (am_client)
-				rprintf(FERROR, "rsync: server is speaking an incompatible beta of protocol 30\n");
+				rprintf(FERROR, "rsync: the server omitted the subprotocol value: %s\n", buf);
 			else
-				io_printf(f_out, "@ERROR: your client is speaking an incompatible beta of protocol 30\n");
+				io_printf(f_out, "@ERROR: your client omitted the subprotocol value: %s\n", buf);
 			return -1;
 		}
 		remote_sub = 0;
+	}
+
+	daemon_auth_choices = strchr(buf + 9, ' ');
+	if (daemon_auth_choices) {
+		char *cp;
+		daemon_auth_choices = strdup(daemon_auth_choices + 1);
+		if ((cp = strchr(daemon_auth_choices, '\n')) != NULL)
+			*cp = '\0';
+	} else if (remote_protocol > 31) {
+		if (am_client)
+			rprintf(FERROR, "rsync: the server omitted the digest name list: %s\n", buf);
+		else
+			io_printf(f_out, "@ERROR: your client omitted the digest name list: %s\n", buf);
+		return -1;
 	}
 
 	if (protocol_version > remote_protocol) {
@@ -288,20 +300,45 @@ int start_inband_exchange(int f_in, int f_out, const char *user, int argc, char 
 
 	sargs[sargc++] = ".";
 
+	if (!old_style_args)
+		snprintf(line, sizeof line, " %.*s/", modlen, modname);
+
 	while (argc > 0) {
 		if (sargc >= MAX_ARGS - 1) {
 		  arg_overflow:
 			rprintf(FERROR, "internal: args[] overflowed in do_cmd()\n");
 			exit_cleanup(RERR_SYNTAX);
 		}
-		if (strncmp(*argv, modname, modlen) == 0
-		 && argv[0][modlen] == '\0')
+		if (strncmp(*argv, modname, modlen) == 0 && argv[0][modlen] == '\0')
 			sargs[sargc++] = modname; /* we send "modname/" */
-		else if (**argv == '-') {
-			if (asprintf(sargs + sargc++, "./%s", *argv) < 0)
-				out_of_memory("start_inband_exchange");
-		} else
-			sargs[sargc++] = *argv;
+		else {
+			char *arg = *argv;
+			int extra_chars = *arg == '-' ? 2 : 0; /* a leading dash needs a "./" prefix. */
+			/* If --old-args was not specified, make sure that the arg won't split at a mod name! */
+			if (!old_style_args && (p = strstr(arg, line)) != NULL) {
+				do {
+					extra_chars += 2;
+				} while ((p = strstr(p+1, line)) != NULL);
+			}
+			if (extra_chars) {
+				char *f = arg;
+				char *t = arg = new_array(char, strlen(arg) + extra_chars + 1);
+				if (*f == '-') {
+					*t++ = '.';
+					*t++ = '/';
+				}
+				while (*f) {
+					if (*f == ' ' && strncmp(f, line, modlen+2) == 0) {
+						*t++ = '[';
+						*t++ = *f++;
+						*t++ = ']';
+					} else
+						*t++ = *f++;
+				}
+				*t = '\0';
+			}
+			sargs[sargc++] = arg;
+		}
 		argv++;
 		argc--;
 	}
@@ -355,7 +392,7 @@ int start_inband_exchange(int f_in, int f_out, const char *user, int argc, char 
 
 	if (rl_nulls) {
 		for (i = 0; i < sargc; i++) {
-			if (!sargs[i]) /* stop at --protect-args NULL */
+			if (!sargs[i]) /* stop at --secluded-args NULL */
 				break;
 			write_sbuf(f_out, sargs[i]);
 			write_byte(f_out, 0);
@@ -380,7 +417,7 @@ int start_inband_exchange(int f_in, int f_out, const char *user, int argc, char 
 	return 0;
 }
 
-#ifdef HAVE_PUTENV
+#if defined HAVE_SETENV || defined HAVE_PUTENV
 static int read_arg_from_pipe(int fd, char *buf, int limit)
 {
 	char *bp = buf, *eob = buf + limit - 1;
@@ -403,25 +440,59 @@ static int read_arg_from_pipe(int fd, char *buf, int limit)
 }
 #endif
 
-static void set_env_str(const char *var, const char *str)
+void set_env_str(const char *var, const char *str)
 {
+#ifdef HAVE_SETENV
+	if (setenv(var, str, 1) < 0)
+		out_of_memory("set_env_str");
+#else
 #ifdef HAVE_PUTENV
 	char *mem;
 	if (asprintf(&mem, "%s=%s", var, str) < 0)
 		out_of_memory("set_env_str");
 	putenv(mem);
+#else
+	(void)var;
+	(void)str;
+#endif
 #endif
 }
 
+#if defined HAVE_SETENV || defined HAVE_PUTENV
+
+static void set_envN_str(const char *var, int num, const char *str)
+{
+#ifdef HAVE_SETENV
+	char buf[128];
+	(void)snprintf(buf, sizeof buf, "%s%d", var, num);
+	if (setenv(buf, str, 1) < 0)
+		out_of_memory("set_env_str");
+#else
 #ifdef HAVE_PUTENV
+	char *mem;
+	if (asprintf(&mem, "%s%d=%s", var, num, str) < 0)
+		out_of_memory("set_envN_str");
+	putenv(mem);
+#endif
+#endif
+}
+
 void set_env_num(const char *var, long num)
 {
+#ifdef HAVE_SETENV
+	char val[64];
+	(void)snprintf(val, sizeof val, "%ld", num);
+	if (setenv(var, val, 1) < 0)
+		out_of_memory("set_env_str");
+#else
+#ifdef HAVE_PUTENV
 	char *mem;
 	if (asprintf(&mem, "%s=%ld", var, num) < 0)
 		out_of_memory("set_env_num");
 	putenv(mem);
-}
 #endif
+#endif
+}
 
 /* Used for "early exec", "pre-xfer exec", and the "name converter" script. */
 static pid_t start_pre_exec(const char *cmd, int *arg_fd_ptr, int *error_fd_ptr)
@@ -451,15 +522,13 @@ static pid_t start_pre_exec(const char *cmd, int *arg_fd_ptr, int *error_fd_ptr)
 		set_env_str("RSYNC_REQUEST", buf);
 
 		for (j = 0; ; j++) {
-			char *p;
 			len = read_arg_from_pipe(arg_fd, buf, BIGPATHBUFLEN);
 			if (len <= 0) {
 				if (!len)
 					break;
 				_exit(1);
 			}
-			if (asprintf(&p, "RSYNC_ARG%d=%s", j, buf) >= 0)
-				putenv(p);
+			set_envN_str("RSYNC_ARG", j, buf);
 		}
 
 		dup2(arg_fd, STDIN_FILENO);
@@ -489,6 +558,8 @@ static pid_t start_pre_exec(const char *cmd, int *arg_fd_ptr, int *error_fd_ptr)
 
 	return pid;
 }
+
+#endif
 
 static void write_pre_exec_args(int write_fd, char *request, char **early_argv, char **argv, int exec_type)
 {
@@ -630,7 +701,7 @@ static int rsync_module(int f_in, int f_out, int i, const char *addr, const char
 	int set_uid;
 	char *p, *err_msg = NULL;
 	char *name = lp_name(i);
-	int use_chroot = lp_use_chroot(i);
+	int use_chroot = lp_use_chroot(i); /* might be 1 (yes), 0 (no), or -1 (unset) */
 	int ret, pre_exec_arg_fd = -1, pre_exec_error_fd = -1;
 	int save_munge_symlinks;
 	pid_t pre_exec_pid = 0;
@@ -755,6 +826,20 @@ static int rsync_module(int f_in, int f_out, int i, const char *addr, const char
 		io_printf(f_out, "@ERROR: no path setting.\n");
 		return -1;
 	}
+	if (use_chroot < 0) {
+		if (strstr(module_dir, "/./") != NULL)
+			use_chroot = 1; /* The module is expecting a chroot inner & outer path. */
+		else if (chroot("/") < 0) {
+			rprintf(FLOG, "chroot test failed: %s. "
+				      "Switching 'use chroot' from unset to false.\n",
+				      strerror(errno));
+			use_chroot = 0;
+		} else {
+			if (chdir("/") < 0)
+			    rsyserr(FLOG, errno, "chdir(\"/\") failed");
+			use_chroot = 1;
+		}
+	}
 	if (use_chroot) {
 		if ((p = strstr(module_dir, "/./")) != NULL) {
 			*p = '\0'; /* Temporary... */
@@ -809,7 +894,7 @@ static int rsync_module(int f_in, int f_out, int i, const char *addr, const char
 
 	log_init(1);
 
-#ifdef HAVE_PUTENV
+#if defined HAVE_SETENV || defined HAVE_PUTENV
 	if ((*lp_early_exec(module_id) || *lp_prexfer_exec(module_id)
 	  || *lp_postxfer_exec(module_id) || *lp_name_converter(module_id))
 	 && !getenv("RSYNC_NO_XFER_EXEC")) {
@@ -891,20 +976,8 @@ static int rsync_module(int f_in, int f_out, int i, const char *addr, const char
 	}
 
 	if (use_chroot) {
-		/*
-		 * XXX: The 'use chroot' flag is a fairly reliable
-		 * source of confusion, because it fails under two
-		 * important circumstances: running as non-root,
-		 * running on Win32 (or possibly others).  On the
-		 * other hand, if you are running as root, then it
-		 * might be better to always use chroot.
-		 *
-		 * So, perhaps if we can't chroot we should just issue
-		 * a warning, unless a "require chroot" flag is set,
-		 * in which case we fail.
-		 */
 		if (chroot(module_chdir)) {
-			rsyserr(FLOG, errno, "chroot %s failed", module_chdir);
+			rsyserr(FLOG, errno, "chroot(\"%s\") failed", module_chdir);
 			io_printf(f_out, "@ERROR: chroot failed\n");
 			return -1;
 		}
@@ -913,7 +986,7 @@ static int rsync_module(int f_in, int f_out, int i, const char *addr, const char
 
 	if (!change_dir(module_chdir, CD_NORMAL))
 		return path_failure(f_out, module_chdir, True);
-	if (module_dirlen || (!use_chroot && !*lp_daemon_chroot()))
+	if (module_dirlen)
 		sanitize_paths = 1;
 
 	if ((munge_symlinks = lp_munge_symlinks(module_id)) < 0)
@@ -1228,8 +1301,12 @@ int start_daemon(int f_in, int f_out)
 	p = lp_daemon_chroot();
 	if (*p) {
 		log_init(0); /* Make use we've initialized syslog before chrooting. */
-		if (chroot(p) < 0 || chdir("/") < 0) {
-			rsyserr(FLOG, errno, "daemon chroot %s failed", p);
+		if (chroot(p) < 0) {
+			rsyserr(FLOG, errno, "daemon chroot(\"%s\") failed", p);
+			return -1;
+		}
+		if (chdir("/") < 0) {
+			rsyserr(FLOG, errno, "daemon chdir(\"/\") failed");
 			return -1;
 		}
 	}

@@ -4,7 +4,7 @@
  * Copyright (C) 1996-2000 Andrew Tridgell
  * Copyright (C) 1996 Paul Mackerras
  * Copyright (C) 2001, 2002 Martin Pool <mbp@samba.org>
- * Copyright (C) 2003-2020 Wayne Davison
+ * Copyright (C) 2003-2022 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -27,11 +27,12 @@
 
 extern int dry_run;
 extern int module_id;
+extern int do_fsync;
 extern int protect_args;
 extern int modify_window;
 extern int relative_paths;
-extern int preserve_times;
 extern int preserve_xattrs;
+extern int omit_link_times;
 extern int preallocate_files;
 extern char *module_dir;
 extern unsigned int module_dirlen;
@@ -158,8 +159,8 @@ int set_times(const char *fname, STRUCT_STAT *stp)
 
 #include "case_N.h"
 		switch_step++;
-		if (preserve_times & PRESERVE_LINK_TIMES) {
-			preserve_times &= ~PRESERVE_LINK_TIMES;
+		if (!omit_link_times) {
+			omit_link_times = 1;
 			if (S_ISLNK(stp->st_mode))
 				return 1;
 		}
@@ -318,16 +319,48 @@ static int safe_read(int desc, char *ptr, size_t len)
 	return n_chars;
 }
 
-/* Copy a file.  If ofd < 0, copy_file unlinks and opens the "dest" file.
- * Otherwise, it just writes to and closes the provided file descriptor.
+/* Remove existing file @dest and reopen, creating a new file with @mode */
+static int unlink_and_reopen(const char *dest, mode_t mode)
+{
+	int ofd;
+
+	if (robust_unlink(dest) && errno != ENOENT) {
+		int save_errno = errno;
+		rsyserr(FERROR_XFER, errno, "unlink %s", full_fname(dest));
+		errno = save_errno;
+		return -1;
+	}
+
+#ifdef SUPPORT_XATTRS
+	if (preserve_xattrs)
+		mode |= S_IWUSR;
+#endif
+	mode &= INITACCESSPERMS;
+	if ((ofd = do_open(dest, O_WRONLY | O_CREAT | O_TRUNC | O_EXCL, mode)) < 0) {
+		int save_errno = errno;
+		rsyserr(FERROR_XFER, save_errno, "open %s", full_fname(dest));
+		errno = save_errno;
+		return -1;
+	}
+	return ofd;
+}
+
+/* Copy contents of file @source to file @dest with mode @mode.
+ *
+ * If @tmpfilefd is < 0, copy_file unlinks @dest and then opens a new
+ * file with name @dest.
+ *
+ * Otherwise, copy_file writes to and closes the provided file
+ * descriptor.
+ *
  * In either case, if --xattrs are being preserved, the dest file will
  * have its xattrs set from the source file.
  *
  * This is used in conjunction with the --temp-dir, --backup, and
  * --copy-dest options. */
-int copy_file(const char *source, const char *dest, int ofd, mode_t mode)
+int copy_file(const char *source, const char *dest, int tmpfilefd, mode_t mode)
 {
-	int ifd;
+	int ifd, ofd;
 	char buf[1024 * 8];
 	int len;   /* Number of bytes read into `buf'. */
 	OFF_T prealloc_len = 0, offset = 0;
@@ -339,23 +372,12 @@ int copy_file(const char *source, const char *dest, int ofd, mode_t mode)
 		return -1;
 	}
 
-	if (ofd < 0) {
-		if (robust_unlink(dest) && errno != ENOENT) {
+	if (tmpfilefd >= 0) {
+		ofd = tmpfilefd;
+	} else {
+		ofd = unlink_and_reopen(dest, mode);
+		if (ofd < 0) {
 			int save_errno = errno;
-			rsyserr(FERROR_XFER, errno, "unlink %s", full_fname(dest));
-			close(ifd);
-			errno = save_errno;
-			return -1;
-		}
-
-#ifdef SUPPORT_XATTRS
-		if (preserve_xattrs)
-			mode |= S_IWUSR;
-#endif
-		mode &= INITACCESSPERMS;
-		if ((ofd = do_open(dest, O_WRONLY | O_CREAT | O_TRUNC | O_EXCL, mode)) < 0) {
-			int save_errno = errno;
-			rsyserr(FERROR_XFER, save_errno, "open %s", full_fname(dest));
 			close(ifd);
 			errno = save_errno;
 			return -1;
@@ -406,16 +428,28 @@ int copy_file(const char *source, const char *dest, int ofd, mode_t mode)
 
 	/* Source file might have shrunk since we fstatted it.
 	 * Cut off any extra preallocated zeros from dest file. */
-	if (offset < prealloc_len && do_ftruncate(ofd, offset) < 0) {
+	if (offset < prealloc_len) {
+#ifdef HAVE_FTRUNCATE
 		/* If we fail to truncate, the dest file may be wrong, so we
 		 * must trigger the "partial transfer" error. */
-		rsyserr(FERROR_XFER, errno, "ftruncate %s", full_fname(dest));
+		if (do_ftruncate(ofd, offset) < 0)
+			rsyserr(FERROR_XFER, errno, "ftruncate %s", full_fname(dest));
+#else
+		rprintf(FERROR_XFER, "no ftruncate for over-long pre-alloc: %s", full_fname(dest));
+#endif
+	}
+
+	if (do_fsync && fsync(ofd) < 0) {
+		int save_errno = errno;
+		rsyserr(FERROR, errno, "fsync failed on %s", full_fname(dest));
+		close(ofd);
+		errno = save_errno;
+		return -1;
 	}
 
 	if (close(ofd) < 0) {
 		int save_errno = errno;
-		rsyserr(FERROR_XFER, errno, "close failed on %s",
-			full_fname(dest));
+		rsyserr(FERROR_XFER, errno, "close failed on %s", full_fname(dest));
 		errno = save_errno;
 		return -1;
 	}
@@ -1349,7 +1383,7 @@ int same_time(time_t f1_sec, unsigned long f1_nsec, time_t f2_sec, unsigned long
 		return f1_sec == f2_sec;
 	if (modify_window < 0)
 		return f1_sec == f2_sec && f1_nsec == f2_nsec;
-	/* The nano seconds doesn't figure into these checks -- time windows don't care about that. */
+	/* The nanoseconds do not figure into these checks -- time windows don't care about that. */
 	if (f2_sec > f1_sec)
 		return f2_sec - f1_sec <= modify_window;
 	return f1_sec - f2_sec <= modify_window;
@@ -1453,11 +1487,18 @@ const char *find_filename_suffix(const char *fn, int fn_len, int *len_ptr)
 
 #define UNIT (1 << 16)
 
-uint32 fuzzy_distance(const char *s1, unsigned len1, const char *s2, unsigned len2)
+uint32 fuzzy_distance(const char *s1, unsigned len1, const char *s2, unsigned len2, uint32 upperlimit)
 {
 	uint32 a[MAXPATHLEN], diag, above, left, diag_inc, above_inc, left_inc;
 	int32 cost;
 	unsigned i1, i2;
+
+	/* Check to see if the Levenshtein distance must be greater than the
+	 * upper limit defined by the previously found lowest distance using
+	 * the heuristic that the Levenshtein distance is greater than the
+	 * difference in length of the two strings */
+	if ((len1 > len2 ? len1 - len2 : len2 - len1) * UNIT > upperlimit)
+		return 0xFFFFU * UNIT + 1;
 
 	if (!len1 || !len2) {
 		if (!len1) {

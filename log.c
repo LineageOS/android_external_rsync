@@ -3,7 +3,7 @@
  *
  * Copyright (C) 1998-2001 Andrew Tridgell <tridge@samba.org>
  * Copyright (C) 2000-2001 Martin Pool <mbp@samba.org>
- * Copyright (C) 2003-2020 Wayne Davison
+ * Copyright (C) 2003-2022 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -34,10 +34,8 @@ extern int module_id;
 extern int allow_8bit_chars;
 extern int protocol_version;
 extern int always_checksum;
-extern int preserve_times;
+extern int preserve_mtimes;
 extern int msgs2stderr;
-extern int xfersum_type;
-extern int checksum_type;
 extern int stdout_format_has_i;
 extern int stdout_format_has_o_or_i;
 extern int logfile_format_has_i;
@@ -61,6 +59,8 @@ extern char *full_module_path;
 extern unsigned int module_dirlen;
 extern char sender_file_sum[MAX_DIGEST_LEN];
 extern const char undetermined_hostname[];
+
+extern struct name_num_item *xfer_sum_nni, *file_sum_nni;
 
 static int log_initialised;
 static int logfile_was_closed;
@@ -680,12 +680,12 @@ static void log_formatted(enum logcode code, const char *format, const char *op,
 			n = NULL;
 			if (S_ISREG(file->mode)) {
 				if (always_checksum)
-					n = sum_as_hex(checksum_type, F_SUM(file), 1);
+					n = sum_as_hex(file_sum_nni->num, F_SUM(file), 1);
 				else if (iflags & ITEM_TRANSFER)
-					n = sum_as_hex(xfersum_type, sender_file_sum, 0);
+					n = sum_as_hex(xfer_sum_nni->num, sender_file_sum, 0);
 			}
 			if (!n) {
-				int sum_len = csum_len_for_type(always_checksum ? checksum_type : xfersum_type,
+				int sum_len = csum_len_for_type(always_checksum ? file_sum_nni->num : xfer_sum_nni->num,
 								always_checksum);
 				memset(buf2, ' ', sum_len*2);
 				buf2[sum_len*2] = '\0';
@@ -706,7 +706,7 @@ static void log_formatted(enum logcode code, const char *format, const char *op,
 				c[1] = 'L';
 				c[3] = '.';
 				c[4] = !(iflags & ITEM_REPORT_TIME) ? '.'
-				     : !preserve_times || !receiver_symlink_times
+				     : !preserve_mtimes || !receiver_symlink_times
 				    || (iflags & ITEM_REPORT_TIMEFAIL) ? 'T' : 't';
 			} else {
 				c[1] = S_ISDIR(file->mode) ? 'd'
@@ -714,7 +714,7 @@ static void log_formatted(enum logcode code, const char *format, const char *op,
 				     : IS_DEVICE(file->mode) ? 'D' : 'f';
 				c[3] = !(iflags & ITEM_REPORT_SIZE) ? '.' : 's';
 				c[4] = !(iflags & ITEM_REPORT_TIME) ? '.'
-				     : !preserve_times ? 'T' : 't';
+				     : !preserve_mtimes ? 'T' : 't';
 			}
 			c[2] = !(iflags & ITEM_REPORT_CHANGE) ? '.' : 'c';
 			c[5] = !(iflags & ITEM_REPORT_PERMS) ? '.' : 'p';
@@ -838,14 +838,24 @@ void maybe_log_item(struct file_struct *file, int iflags, int itemizing, const c
 
 void log_delete(const char *fname, int mode)
 {
-	static struct {
-		union file_extras ex[4]; /* just in case... */
-		struct file_struct file;
-	} x; /* Zero-initialized due to static declaration. */
+	static struct file_struct *file = NULL;
 	int len = strlen(fname);
 	const char *fmt;
 
-	x.file.mode = mode;
+	if (!file) {
+		int extra_len = (file_extra_cnt + 2) * EXTRA_LEN;
+		char *bp;
+#if EXTRA_ROUNDING > 0
+		if (extra_len & (EXTRA_ROUNDING * EXTRA_LEN))
+			extra_len = (extra_len | (EXTRA_ROUNDING * EXTRA_LEN)) + EXTRA_LEN;
+#endif
+
+		bp = new_array0(char, FILE_STRUCT_LEN + extra_len + 1);
+		bp += extra_len;
+		file = (struct file_struct *)bp;
+	}
+
+	file->mode = mode;
 
 	if (am_server && protocol_version >= 29 && len < MAXPATHLEN) {
 		if (S_ISDIR(mode))
@@ -855,14 +865,14 @@ void log_delete(const char *fname, int mode)
 		;
 	else {
 		fmt = stdout_format_has_o_or_i ? stdout_format : "deleting %n";
-		log_formatted(FCLIENT, fmt, "del.", &x.file, fname, ITEM_DELETED, NULL);
+		log_formatted(FCLIENT, fmt, "del.", file, fname, ITEM_DELETED, NULL);
 	}
 
 	if (!logfile_name || dry_run || !logfile_format)
 		return;
 
 	fmt = logfile_format_has_o_or_i ? logfile_format : "deleting %n";
-	log_formatted(FLOG, fmt, "del.", &x.file, fname, ITEM_DELETED, NULL);
+	log_formatted(FLOG, fmt, "del.", file, fname, ITEM_DELETED, NULL);
 }
 
 /*
