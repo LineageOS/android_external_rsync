@@ -21,6 +21,7 @@ cc_defaults {
         "libcrypto",
         "liblz4",
         "libssl",
+        "libzstd",
     ],
 }
 cc_binary {
