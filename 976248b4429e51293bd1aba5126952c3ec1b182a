@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "660faf81_23864d37",
+        "filename": "/PATCHSET_LEVEL",
+        "patchSetId": 1
+      },
+      "lineNbr": 0,
+      "author": {
+        "id": 17945
+      },
+      "writtenOn": "2022-12-21T08:45:23Z",
+      "side": 1,
+      "message": "Needs a fork of external_zstd : https://github.com/DroidFreak32/android_external_zstd",
+      "revId": "976248b4429e51293bd1aba5126952c3ec1b182a",
+      "serverId": "1ec6b3db-b2c1-4fa4-84a2-4c7efe89ba71"
+    }
+  ]
+}
