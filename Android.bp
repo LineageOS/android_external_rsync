@@ -23,6 +23,7 @@ cc_binary {
         "libcrypto",
         "liblz4",
         "libssl",
+        "libzstd",
     ],
 
     srcs: [
