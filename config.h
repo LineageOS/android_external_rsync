@@ -790,7 +790,7 @@
 
 /* Undefine if you do not want zstd compression. By default this is defined.
    */
-/* #undef SUPPORT_ZSTD */
+#define SUPPORT_ZSTD 1
 
 /* Define to 1 if you want rsync to make use of iconv_open() */
 /* #undef USE_ICONV_OPEN */

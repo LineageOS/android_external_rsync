@@ -1,9 +1,11 @@
-cc_defaults {
-    name: "rsync_defaults",
+cc_binary {
+    name: "rsync",
     product_specific: true,
+
     ldflags: [
         "-Wl,--strip-all",
     ],
+
     cflags: ["-DHAVE_CONFIG_H", "-O3"] + [
         "-Wno-deprecated-declarations",
         "-Wno-implicit-function-declaration",
@@ -21,11 +23,9 @@ cc_defaults {
         "libcrypto",
         "liblz4",
         "libssl",
+	"libzstd",
     ],
-}
-cc_binary {
-    name: "rsync",
-    defaults: ["rsync_defaults"],
+
     srcs: [
         "access.c",
         "acls.c",
