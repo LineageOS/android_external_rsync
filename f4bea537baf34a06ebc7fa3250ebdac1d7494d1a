@@ -39,6 +39,30 @@
       },
       "revId": "f4bea537baf34a06ebc7fa3250ebdac1d7494d1a",
       "serverId": "1ec6b3db-b2c1-4fa4-84a2-4c7efe89ba71"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "adc98691_ec5546f4",
+        "filename": "known_substitutions_android.sh",
+        "patchSetId": 1
+      },
+      "lineNbr": 3,
+      "author": {
+        "id": 17945
+      },
+      "writtenOn": "2022-12-22T16:49:14Z",
+      "side": 1,
+      "message": "My reasoning was that AOSP don\u0027t ship rsync, We do.But If you don\u0027t agree, I\u0027ll edit :)",
+      "parentUuid": "c8fcdfeb_a7d5ddb8",
+      "range": {
+        "startLine": 3,
+        "startChar": 28,
+        "endLine": 3,
+        "endChar": 37
+      },
+      "revId": "f4bea537baf34a06ebc7fa3250ebdac1d7494d1a",
+      "serverId": "1ec6b3db-b2c1-4fa4-84a2-4c7efe89ba71"
     }
   ]
 }
