@@ -16,6 +16,29 @@
       "message": "Perhaps there is a better way of running configure against LineageOS sources itself, however my tries have always ended up in x86 binaries.\n\nSetting the env variables to point to our aarch64 GCC fork doesnt work and configure complains the compiler cannot produce executables.\n\nIf I could get a helping hand to setup the build environment correctly, we should be able to generate a working config directly without this *hack*.\n\nFork with the merge history: https://github.com/DroidFreak32/android_external_rsync",
       "revId": "f4bea537baf34a06ebc7fa3250ebdac1d7494d1a",
       "serverId": "1ec6b3db-b2c1-4fa4-84a2-4c7efe89ba71"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "c8fcdfeb_a7d5ddb8",
+        "filename": "known_substitutions_android.sh",
+        "patchSetId": 1
+      },
+      "lineNbr": 3,
+      "author": {
+        "id": 11883
+      },
+      "writtenOn": "2022-12-22T16:15:04Z",
+      "side": 1,
+      "message": "AOSP?",
+      "range": {
+        "startLine": 3,
+        "startChar": 28,
+        "endLine": 3,
+        "endChar": 37
+      },
+      "revId": "f4bea537baf34a06ebc7fa3250ebdac1d7494d1a",
+      "serverId": "1ec6b3db-b2c1-4fa4-84a2-4c7efe89ba71"
     }
   ]
 }
