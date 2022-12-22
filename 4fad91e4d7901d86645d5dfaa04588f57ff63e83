@@ -33,6 +33,24 @@
       "message": "no real reason to have cc_defaults as there\u0027s one only target using it, merge them together",
       "revId": "4fad91e4d7901d86645d5dfaa04588f57ff63e83",
       "serverId": "1ec6b3db-b2c1-4fa4-84a2-4c7efe89ba71"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "3ee83c17_e1938193",
+        "filename": "Android.bp",
+        "patchSetId": 1
+      },
+      "lineNbr": 1,
+      "author": {
+        "id": 17945
+      },
+      "writtenOn": "2022-12-22T16:47:52Z",
+      "side": 1,
+      "message": "Ack",
+      "parentUuid": "763500c3_877ae20e",
+      "revId": "4fad91e4d7901d86645d5dfaa04588f57ff63e83",
+      "serverId": "1ec6b3db-b2c1-4fa4-84a2-4c7efe89ba71"
     }
   ]
 }
