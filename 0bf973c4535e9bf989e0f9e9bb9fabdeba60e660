@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "9033ec11_89b6981f",
+        "filename": "/PATCHSET_LEVEL",
+        "patchSetId": 2
+      },
+      "lineNbr": 0,
+      "author": {
+        "id": 16185
+      },
+      "writtenOn": "2023-01-01T22:30:41Z",
+      "side": 1,
+      "message": "Virtual +2 to push to HEADs",
+      "revId": "0bf973c4535e9bf989e0f9e9bb9fabdeba60e660",
+      "serverId": "1ec6b3db-b2c1-4fa4-84a2-4c7efe89ba71"
+    }
+  ]
+}
