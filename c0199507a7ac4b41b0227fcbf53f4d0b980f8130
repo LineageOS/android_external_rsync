@@ -1,0 +1,27 @@
+{
+  "comments": [
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "1433cf81_5c8b95e6",
+        "filename": "Android.bp",
+        "patchSetId": 1
+      },
+      "lineNbr": 3,
+      "author": {
+        "id": 11883
+      },
+      "writtenOn": "2023-05-13T12:14:58Z",
+      "side": 1,
+      "message": "I just noticed we\u0027re now installing in product vs system, this also made the zstd .bp entry add product_available, while it\u0027s fine, we could\u0027ve avoided it altogether just removing this entry",
+      "range": {
+        "startLine": 3,
+        "startChar": 0,
+        "endLine": 3,
+        "endChar": 27
+      },
+      "revId": "c0199507a7ac4b41b0227fcbf53f4d0b980f8130",
+      "serverId": "1ec6b3db-b2c1-4fa4-84a2-4c7efe89ba71"
+    }
+  ]
+}
