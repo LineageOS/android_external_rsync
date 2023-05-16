@@ -1,6 +1,6 @@
 cc_binary {
     name: "rsync",
-    product_specific: true,
+    system_ext_specific: true,
 
     cflags: ["-DHAVE_CONFIG_H"] + [
         "-Wno-deprecated-declarations",
