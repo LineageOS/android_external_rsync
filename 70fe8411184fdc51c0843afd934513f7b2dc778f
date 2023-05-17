@@ -51,6 +51,24 @@
       "parentUuid": "482ebc91_694d75d9",
       "revId": "70fe8411184fdc51c0843afd934513f7b2dc778f",
       "serverId": "1ec6b3db-b2c1-4fa4-84a2-4c7efe89ba71"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "e83f105a_38c61edd",
+        "filename": "/PATCHSET_LEVEL",
+        "patchSetId": 5
+      },
+      "lineNbr": 0,
+      "author": {
+        "id": 11883
+      },
+      "writtenOn": "2023-05-17T12:12:07Z",
+      "side": 1,
+      "message": "That was explained in the gitlab ticket, I pushed the AOSP tags we\u0027re currently using rather than the fork, then re-made the changes on top of that via gerrit\nNot sure wtf happened",
+      "parentUuid": "1c648d9b_b5894bdb",
+      "revId": "70fe8411184fdc51c0843afd934513f7b2dc778f",
+      "serverId": "1ec6b3db-b2c1-4fa4-84a2-4c7efe89ba71"
     }
   ]
 }
