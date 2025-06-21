@@ -10,6 +10,8 @@ cc_binary {
         "-Wno-unused-variable",
     ],
 
+    c_std: "gnu89",
+
     include_dirs: [
         "external/rsync/popt",
         "external/rsync/zlib",
