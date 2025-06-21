@@ -2,6 +2,7 @@ cc_binary {
     name: "rsync",
     system_ext_specific: true,
 
+    c_std: "c17",
     cflags: ["-DHAVE_CONFIG_H"] + [
         "-Wno-deprecated-declarations",
         "-Wno-implicit-function-declaration",
