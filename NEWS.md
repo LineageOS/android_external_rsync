@@ -1,3 +1,143 @@
+# NEWS for rsync 3.4.1 (16 Jan 2025)
+
+Release 3.4.1 is a fix for regressions introduced in 3.4.0
+
+## Changes in this version:
+
+### BUG FIXES:
+
+ - fixed handling of -H flag with conflict in internal flag values
+
+ - fixed a user after free in logging of failed rename
+
+ - fixed build on systems without openat()
+
+ - removed dependency on alloca() in bundled popt
+
+### DEVELOPER RELATED:
+
+ - fix to permissions handling in the developer release script
+
+------------------------------------------------------------------------------
+# NEWS for rsync 3.4.0 (15 Jan 2025)
+
+Release 3.4.0 is a security release that fixes a number of important vulnerabilities.
+
+For more details on the vulnerabilities please see the CERT report
+https://kb.cert.org/vuls/id/952657
+
+## Changes in this version:
+
+### PROTOCOL NUMBER:
+
+ - The protocol number was changed to 32 to make it easier for
+   administrators to check their servers have been updated
+
+### SECURITY FIXES:
+
+Many thanks to Simon Scannell, Pedro Gallegos, and Jasiel Spelman at
+Google Cloud Vulnerability Research and Aleksei Gorban (Loqpa) for
+discovering these vulnerabilities and working with the rsync project
+to develop and test fixes.
+
+- CVE-2024-12084 - Heap Buffer Overflow in Checksum Parsing.
+
+- CVE-2024-12085 - Info Leak via uninitialized Stack contents defeats ASLR.
+  
+- CVE-2024-12086 - Server leaks arbitrary client files.
+
+- CVE-2024-12087 - Server can make client write files outside of destination directory using symbolic links.
+
+- CVE-2024-12088 - --safe-links Bypass.
+
+- CVE-2024-12747 - symlink race condition.
+
+### BUG FIXES:
+
+- Fixed the included popt to avoid a memory error on modern gcc versions.
+
+- Fixed an incorrect extern variable's type that caused an ACL issue on macOS.
+
+- Fixed IPv6 configure check
+
+### INTERNAL:
+
+- Updated included popt to version 1.19.
+
+### DEVELOPER RELATED:
+
+- Various improvements to the release scripts and git setup.
+
+- Improved packaging/var-checker to identify variable type issues.
+
+- added FreeBSD and Solaris CI builds
+
+------------------------------------------------------------------------------
+# NEWS for rsync 3.3.0 (6 Apr 2024)
+
+## Changes in this version:
+
+### BUG FIXES:
+
+- Fixed a bug with `--sparse --inplace` where a trailing gap in the source
+  file would not clear out the trailing data in the destination file.
+
+- Fixed an buffer overflow in the checksum2 code if SHA1 is being used for
+  the checksum2 algorithm.
+
+- Fixed an issue when rsync is compiled using `_FORTIFY_SOURCE` so that the
+  extra tests don't complain about a strlcpy() limit value (which was too
+  large, even though it wasn't possible for the larger value to cause an
+  overflow).
+
+- Add a backtick to the list of characters that the filename quoting needs to
+  escape using backslashes.
+
+- Fixed a string-comparison issue in the internal handling of `--progress` (a
+  locale such as tr_TR.utf-8 needed the internal triggering of `--info` options
+  to use upper-case flag names to ensure that they match).
+
+- Make sure that a local transfer marks the sender side as trusted.
+
+- Change the argv handling to work with a newer popt library -- one that likes
+  to free more data than it used to.
+
+- Rsync now calls `OpenSSL_add_all_algorithms()` when compiled against an older
+  openssl library.
+
+- Fixed a problem in the daemon auth for older protocols (29 and before) if the
+  openssl library is being used to compute MD4 checksums.
+
+- Fixed `rsync -VV` on Cygwin -- it needed a flush of stdout.
+
+- Fixed an old stats bug that counted devices as symlinks.
+
+### ENHANCEMENTS:
+
+- Enhanced rrsync with the `-no-overwrite` option that allows you to ensure
+  that existing files on your restricted but writable directory can't be
+  modified.
+
+- Enhanced the manpages to mark links with .UR & .UE. If your nroff doesn't
+  support these idioms, touch the file `.md2man-force` in the source directory
+  so that `md-convert` gets called with the `--force-link-text` option, and
+  that should ensure that your manpages are still readable even with the
+  ignored markup.
+
+- Some manpage improvements on the handling of [global] modules.
+
+- Changed the mapfrom & mapto perl scripts (in the support dir) into a single
+  python script named idmap.  Converted a couple more perl scripts into python.
+
+- Changed the mnt-excl perl script (in the support dir) into a python script.
+
+### DEVELOPER RELATED:
+
+ - Updated config.guess (timestamp 2023-01-01) and config.sub (timestamp
+   2023-01-21).
+
+------------------------------------------------------------------------------
+
 # NEWS for rsync 3.2.7 (20 Oct 2022)
 
 ## Changes in this version:
@@ -50,7 +190,7 @@
 
 - The `--fuzzy` option was optimized a bit to try to cut down on the amount of
   computations when considering a big pool of files. The simple heuristic from
-  Kenneth Finnegan resuled in about a 2x speedup.
+  Kenneth Finnegan resulted in about a 2x speedup.
 
 - If rsync is forced to use protocol 29 or before (perhaps due to talking to an
   rsync before 3.0.0), the modify time of a file is limited to 4-bytes.  Rsync
@@ -217,9 +357,10 @@
  - A new form of arg protection was added that works similarly to the older
    `--protect-args` ([`-s`](rsync.1#opt)) option but in a way that avoids
    breaking things like rrsync (the restricted rsync script): rsync now uses
-   backslash escaping for sending "shell-active" characters to the remote
-   shell. This includes spaces, so fetching a remote file via a simple quoted
-   filename value now works by default without any extra quoting:
+   backslash escaping for sending "shell-active" characters to the remote shell
+   (such as `$(){}<>#&` and others). This includes spaces, so fetching a remote
+   file via a quoted filename value now works by default without any extra
+   quoting:
 
    ```shell
        rsync -aiv host:'a simple file.pdf' .
@@ -227,10 +368,14 @@
 
    Wildcards are not escaped in filename args, but they are escaped in options
    like the [`--suffix`](rsync.1#opt) and [`--usermap`](rsync.1#opt) values.
-   If your rsync script depends on the old arg-splitting behavior, either run
-   it with the [`--old-args`](rsync.1#opt) option or `export RSYNC_OLD_ARGS=1`
-   in the script's environment.  See also the [ADVANCED USAGE](rsync.1#)
-   section of rsync's manpage for how to use a more modern arg style.
+
+   If a script depends on the old arg behavior (perhaps because it quotes or
+   protects the args already, or perhaps because it expects arg splitting),
+   there are two easy ways to get things going with a modern rsync: either
+   `export RSYNC_OLD_ARGS=1` in the script's environment (perhaps in the script
+   itself) or add the option [`--old-args`](rsync.1#opt) to the rsync commands
+   that are run.  See also the [ADVANCED USAGE](rsync.1#) section of rsync's
+   manpage for how to use a more modern arg style.
 
  - A long-standing bug was preventing rsync from figuring out the current
    locale's decimal point character, which made rsync always output numbers
@@ -4692,6 +4837,9 @@
 
 | RELEASE DATE | VER.   | DATE OF COMMIT\* | PROTOCOL    |
 |--------------|--------|------------------|-------------|
+| 16 Jan 2025  | 3.4.1  |                  | 32          |
+| 15 Jan 2025  | 3.4.0  |                  | 32          |
+| 06 Apr 2024  | 3.3.0  |                  | 31          |
 | 20 Oct 2022  | 3.2.7  |                  | 31          |
 | 09 Sep 2022  | 3.2.6  |                  | 31          |
 | 14 Aug 2022  | 3.2.5  |                  | 31          |

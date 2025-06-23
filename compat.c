@@ -834,6 +834,8 @@ void output_daemon_greeting(int f_out, int am_client)
 	char tmpbuf[MAX_NSTR_STRLEN];
 	int our_sub = get_subprotocol_version();
 
+	init_checksum_choices();
+
 	get_default_nno_list(&valid_auth_checksums, tmpbuf, MAX_NSTR_STRLEN, '\0');
 
 	io_printf(f_out, "@RSYNCD: %d.%d %s\n", protocol_version, our_sub, tmpbuf);
@@ -873,8 +875,10 @@ void negotiate_daemon_auth(int f_out, int am_client)
 		}
 	}
 	am_server = save_am_server;
-	if (md4_is_old && valid_auth_checksums.negotiated_nni->num == CSUM_MD4)
+	if (md4_is_old && valid_auth_checksums.negotiated_nni->num == CSUM_MD4) {
 		valid_auth_checksums.negotiated_nni->num = CSUM_MD4_OLD;
+		valid_auth_checksums.negotiated_nni->flags = 0;
+	}
 }
 
 int get_subprotocol_version()

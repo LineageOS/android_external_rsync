@@ -245,7 +245,7 @@ to be copied to different destination directories using more than one copy.
 
 While a copy of a case-ignoring filesystem to a case-ignoring filesystem can
 work out fairly well, if no `--delete-during` or `--delete-before` option is
-active, rsync can potentially update an existing file on the receiveing side
+active, rsync can potentially update an existing file on the receiving side
 without noticing that the upper-/lower-case of the filename should be changed
 to match the sender.
 
@@ -1636,7 +1636,9 @@ expand it.
 0.  `--crtimes`, `-N,`
 
     This tells rsync to set the create times (newness) of the destination
-    files to the same value as the source files.
+    files to the same value as the source files. Your OS & filesystem must
+    support the setting of arbitrary creation (birth) times for this option
+    to be supported.
 
 0.  `--omit-dir-times`, `-O`
 
@@ -2104,7 +2106,8 @@ expand it.
     See the [`--max-size`](#opt) option for a description of how SIZE can be
     specified.  The default suffix if none is given is bytes.
 
-    Beginning in 3.2.3, a value of 0 specifies no limit.
+    Beginning in 3.2.7, a value of 0 is an easy way to specify SIZE_MAX (the
+    largest limit possible).
 
     You can set a default value using the environment variable
     [`RSYNC_MAX_ALLOC`](#) using the same SIZE values as supported by this
@@ -3992,7 +3995,7 @@ option (though the 2 commands behave differently if deletions are enabled):
 >     rsync -aiR x/y/file.txt host:/tmp/
 
 The following command does not need an include of the "x" directory because it
-is not a part of the transfer (note the traililng slash).  Running this command
+is not a part of the transfer (note the trailing slash).  Running this command
 would copy just "`/tmp/x/file.txt`" because the "y" and "z" dirs get excluded:
 
 >     rsync -ai -f'+ file.txt' -f'- *' x/ host:/tmp/x/
@@ -4815,7 +4818,7 @@ An rsync web site is available at <https://rsync.samba.org/>.  The site
 includes an FAQ-O-Matic which may cover questions unanswered by this manual
 page.
 
-The rsync github project is <https://github.com/WayneD/rsync>.
+The rsync github project is <https://github.com/RsyncProject/rsync>.
 
 We would be delighted to hear from you if you like this program.  Please
 contact the mailing-list at <rsync@lists.samba.org>.
@@ -4835,8 +4838,7 @@ David Bell.  I've probably missed some people, my apologies if I have.
 ## AUTHOR
 
 Rsync was originally written by Andrew Tridgell and Paul Mackerras.  Many
-people have later contributed to it. It is currently maintained by Wayne
-Davison.
+people from around the world have helped to maintain and improve it.
 
 Mailing lists for support and development are available at
 <https://lists.samba.org/>.

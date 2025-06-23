@@ -74,25 +74,7 @@ reread the `rsyncd.conf` file. The file is re-read on each client connection.
 ## GLOBAL PARAMETERS
 
 The first parameters in the file (before a [module] header) are the global
-parameters.  Rsync also allows for the use of a "[global]" module name to
-indicate the start of one or more global-parameter sections (the name must be
-lower case).
-
-You may also include any module parameters in the global part of the config
-file in which case the supplied value will override the default for that
-parameter.
-
-You may use references to environment variables in the values of parameters.
-String parameters will have %VAR% references expanded as late as possible (when
-the string is first used in the program), allowing for the use of variables
-that rsync sets at connection time, such as RSYNC_USER_NAME.  Non-string
-parameters (such as true/false settings) are expanded when read from the config
-file.  If a variable does not exist in the environment, or if a sequence of
-characters is not a valid reference (such as an un-paired percent sign), the
-raw characters are passed through unchanged.  This helps with backward
-compatibility and safety (e.g. expanding a non-existent %VAR% to an empty
-string in a path could result in a very unsafe path).  The safest way to insert
-a literal % into a value is to use %%.
+parameters:
 
 [comment]: # (An OL starting at 0 is converted into a DL by the parser.)
 
@@ -138,6 +120,22 @@ a literal % into a value is to use %%.
     You can override the default backlog value when the daemon listens for
     connections.  It defaults to 5.
 
+You may also include any [MODULE PARAMETERS](#) in the global part of the
+config file, in which case the supplied value will override the default for
+that parameter.
+
+You may use references to environment variables in the values of parameters.
+String parameters will have %VAR% references expanded as late as possible (when
+the string is first used in the program), allowing for the use of variables
+that rsync sets at connection time, such as RSYNC_USER_NAME.  Non-string
+parameters (such as true/false settings) are expanded when read from the config
+file.  If a variable does not exist in the environment, or if a sequence of
+characters is not a valid reference (such as an un-paired percent sign), the
+raw characters are passed through unchanged.  This helps with backward
+compatibility and safety (e.g. expanding a non-existent %VAR% to an empty
+string in a path could result in a very unsafe path).  The safest way to insert
+a literal % into a value is to use %%.
+
 ## MODULE PARAMETERS
 
 After the global parameters you should define a number of modules, each module
@@ -146,11 +144,17 @@ a module name in square brackets [module] followed by the parameters for that
 module.  The module name cannot contain a slash or a closing square bracket.
 If the name contains whitespace, each internal sequence of whitespace will be
 changed into a single space, while leading or trailing whitespace will be
-discarded.  Also, the name cannot be "global" as that exact name indicates that
-global parameters follow (see above).
+discarded.
 
-As with GLOBAL PARAMETERS, you may use references to environment variables in
-the values of parameters.  See the GLOBAL PARAMETERS section for more details.
+There is also a special module name of "[global]" that does not define a module
+but instead switches back to the global settings context where default
+parameters can be specified.  Because each defined module gets its full set of
+parameters as a combination of the default values that are set at that position
+in the config file plus its own parameter list, the use of a "[global]" section
+can help to maintain shared config values for multiple modules.
+
+As with [GLOBAL PARAMETERS](#), you may use references to environment variables
+in the values of parameters.  See that section for details.
 
 0.  `comment`
 
@@ -1019,7 +1023,7 @@ the values of parameters.  See the GLOBAL PARAMETERS section for more details.
     _not_ displayed if the script returns success.  The other programs cannot
     send any text to the user.  All output except for the `pre-xfer exec`
     stdout goes to the corresponding daemon's stdout/stderr, which is typically
-    discarded.  See the `--no-detatch` option for a way to see the daemon's
+    discarded.  See the `--no-detach` option for a way to see the daemon's
     output, which can assist with debugging.
 
     Note that the `early exec` command runs before any part of the transfer
@@ -1184,6 +1188,9 @@ An example nginx proxy setup is as follows:
 > }
 > ```
 
+If rsyncd should be accessible encrypted and unencrypted at the same time make
+the proxy listen on port 873 as well and let it handle both streams.
+
 ## DAEMON CONFIG EXAMPLES
 
 A simple rsyncd.conf file that allow anonymous rsync to a ftp area at
@@ -1256,7 +1263,7 @@ Rsync is distributed under the GNU General Public License.  See the file
 [COPYING](COPYING) for details.
 
 An rsync web site is available at <https://rsync.samba.org/> and its github
-project is <https://github.com/WayneD/rsync>.
+project is <https://github.com/RsyncProject/rsync>.
 
 ## THANKS
 
@@ -1266,8 +1273,7 @@ Thanks to Karsten Thygesen for his many suggestions and documentation!
 ## AUTHOR
 
 Rsync was originally written by Andrew Tridgell and Paul Mackerras.  Many
-people have later contributed to it. It is currently maintained by Wayne
-Davison.
+people from around the world have helped to maintain and improve it.
 
 Mailing lists for support and development are available at
 <https://lists.samba.org/>.

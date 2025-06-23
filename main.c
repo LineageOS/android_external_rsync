@@ -66,7 +66,7 @@ extern int protect_args;
 extern int relative_paths;
 extern int sanitize_paths;
 extern int curr_dir_depth;
-extern int curr_dir_len;
+extern unsigned int curr_dir_len;
 extern int module_id;
 extern int rsync_port;
 extern int whole_file;
@@ -89,6 +89,8 @@ extern int backup_dir_len;
 extern int basis_dir_cnt;
 extern int default_af_hint;
 extern int stdout_format_has_i;
+extern int trust_sender_filter;
+extern int trust_sender_args;
 extern struct stats stats;
 extern char *stdout_format;
 extern char *logfile_format;
@@ -1381,15 +1383,6 @@ int client_run(int f_in, int f_out, pid_t pid, int argc, char *argv[])
 	return MAX(exit_code, exit_code2);
 }
 
-static void dup_argv(char *argv[])
-{
-	int i;
-
-	for (i = 0; argv[i]; i++)
-		argv[i] = strdup(argv[i]);
-}
-
-
 /* Start a client for either type of remote connection.  Work out
  * whether the arguments request a remote shell or rsyncd connection,
  * and call the appropriate connection function, then run_client.
@@ -1404,10 +1397,6 @@ static int start_client(int argc, char *argv[])
 	int f_in, f_out;
 	int ret;
 	pid_t pid;
-
-	/* Don't clobber argv[] so that ps(1) can still show the right
-	 * command line. */
-	dup_argv(argv);
 
 	if (!read_batch) { /* for read_batch, NO source is specified */
 		char *path = check_for_hostspec(argv[0], &shell_machine, &rsync_port);
@@ -1484,8 +1473,10 @@ static int start_client(int argc, char *argv[])
 	}
 
 	/* A local transfer doesn't unbackslash anything, so leave the args alone. */
-	if (local_server)
+	if (local_server) {
 		old_style_args = 2;
+		trust_sender_args = trust_sender_filter = 1;
+	}
 
 	if (!rsync_port && remote_argc && !**remote_argv) /* Turn an empty arg into a dot dir. */
 		*remote_argv = ".";

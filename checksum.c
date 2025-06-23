@@ -3,7 +3,7 @@
  *
  * Copyright (C) 1996 Andrew Tridgell
  * Copyright (C) 1996 Paul Mackerras
- * Copyright (C) 2004-2022 Wayne Davison
+ * Copyright (C) 2004-2023 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -154,7 +154,7 @@ static const EVP_MD *csum_evp_md(struct name_num_item *nni)
 		emd = NULL;
 	else
 #endif
-		emd = EVP_get_digestbyname(nni->name);                                               
+		emd = EVP_get_digestbyname(nni->name);
 	if (emd && !(nni->flags & NNI_EVP_OK)) { /* Make sure it works before we advertise it */
 		if (!ctx_evp && !(ctx_evp = EVP_MD_CTX_create()))
 			out_of_memory("csum_evp_md");
@@ -300,6 +300,7 @@ uint32 get_checksum1(char *buf1, int32 len)
 }
 #endif
 
+/* The "sum" buffer must be at least MAX_DIGEST_LEN bytes! */
 void get_checksum2(char *buf, int32 len, char *sum)
 {
 #ifdef USE_OPENSSL
@@ -405,7 +406,7 @@ void file_checksum(const char *fname, const STRUCT_STAT *st_p, char *sum)
 	int32 remainder;
 	int fd;
 
-	fd = do_open(fname, O_RDONLY, 0);
+	fd = do_open_checklinks(fname);
 	if (fd == -1) {
 		memset(sum, 0, file_sum_len);
 		return;
@@ -786,6 +787,10 @@ void init_checksum_choices()
 
 	if (initialized_choices)
 		return;
+
+#if defined USE_OPENSSL && OPENSSL_VERSION_NUMBER < 0x10100000L
+	OpenSSL_add_all_algorithms();
+#endif
 
 #if defined SUPPORT_XXH3 || defined USE_OPENSSL
 	for (nni = valid_checksums.list; nni->name; nni++)

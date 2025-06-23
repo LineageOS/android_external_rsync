@@ -4,7 +4,7 @@
  * Copyright (C) 1996 Andrew Tridgell
  * Copyright (C) 1996 Paul Mackerras
  * Copyright (C) 2001, 2002 Martin Pool <mbp@samba.org>
- * Copyright (C) 2002-2022 Wayne Davison
+ * Copyright (C) 2002-2023 Wayne Davison
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -1390,7 +1390,7 @@ struct file_struct *make_file(const char *fname, struct file_list *flist,
 
 	if (copy_devices && am_sender && IS_DEVICE(st.st_mode)) {
 		if (st.st_size == 0) {
-			int fd = do_open(fname, O_RDONLY, 0);
+			int fd = do_open_checklinks(fname);
 			if (fd >= 0) {
 				st.st_size = get_device_size(fd, fname);
 				close(fd);
@@ -2367,7 +2367,7 @@ struct file_list *send_file_list(int f, int argc, char *argv[])
 		}
 
 		dirlen = dir ? strlen(dir) : 0;
-		if (dirlen != lastdir_len || memcmp(lastdir, dir, dirlen) != 0) {
+		if (dirlen != lastdir_len || (dirlen && memcmp(lastdir, dir, dirlen) != 0)) {
 			if (!change_pathname(NULL, dir, -dirlen))
 				goto bad_path;
 			lastdir = pathname;
@@ -2584,6 +2584,19 @@ struct file_list *recv_file_list(int f, int dir_ndx)
 		init_hard_links();
 #endif
 
+	if (inc_recurse && dir_ndx >= 0) {
+		if (dir_ndx >= dir_flist->used) {
+			rprintf(FERROR_XFER, "rsync: refusing invalid dir_ndx %u >= %u\n", dir_ndx, dir_flist->used);
+			exit_cleanup(RERR_PROTOCOL);
+		}
+		struct file_struct *file = dir_flist->files[dir_ndx];
+		if (file->flags & FLAG_GOT_DIR_FLIST) {
+			rprintf(FERROR_XFER, "rsync: refusing malicious duplicate flist for dir %d\n", dir_ndx);
+			exit_cleanup(RERR_PROTOCOL);
+		}
+		file->flags |= FLAG_GOT_DIR_FLIST;
+	}
+
 	flist = flist_new(0, "recv_file_list");
 	flist_expand(flist, FLIST_START_LARGE);
 
@@ -2659,7 +2672,7 @@ struct file_list *recv_file_list(int f, int dir_ndx)
 		} else if (S_ISLNK(file->mode))
 			stats.num_symlinks++;
 		else if (IS_DEVICE(file->mode))
-			stats.num_symlinks++;
+			stats.num_devices++;
 		else
 			stats.num_specials++;
 
