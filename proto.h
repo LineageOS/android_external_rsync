@@ -85,7 +85,7 @@ char *get_rule_prefix(filter_rule *rule, const char *pat, int for_xfer,
 		      unsigned int *plen_ptr);
 void send_filter_list(int f_out);
 void recv_filter_list(int f_in);
-int sparse_end(int f, OFF_T size);
+int sparse_end(int f, OFF_T size, int updating_basis_or_equiv);
 int flush_write_file(int f);
 int write_file(int f, int use_seek, OFF_T offset, const char *buf, int len);
 int skip_matched(int fd, OFF_T offset, const char *buf, int len);
@@ -306,6 +306,8 @@ int do_utime(const char *path, STRUCT_STAT *stp);
 OFF_T do_fallocate(int fd, OFF_T offset, OFF_T length);
 int do_punch_hole(int fd, OFF_T pos, OFF_T len);
 int do_open_nofollow(const char *pathname, int flags);
+int secure_relative_open(const char *basedir, const char *relpath, int flags, mode_t mode);
+int do_open_checklinks(const char *pathname);
 void init_compression_level(void);
 void set_compression(const char *fname);
 void send_token(int f, int32 token, struct map_struct *buf, OFF_T offset,
