@@ -86,6 +86,7 @@ int sparse_files = 0;
 int preallocate_files = 0;
 int do_compression = 0;
 int do_compression_level = CLVL_NOT_SPECIFIED;
+int do_compression_threads = 0; /*n = 0 use rsync thread, n >= 1 spawn n threads for compression */
 int am_root = 0; /* 0 = normal, 1 = root, 2 = --super, -1 = --fake-super */
 int am_server = 0;
 int am_sender = 0;
@@ -113,11 +114,20 @@ int mkpath_dest_arg = 0;
 int allow_inc_recurse = 1;
 int xfer_dirs = -1;
 int am_daemon = 0;
+/* Set after a successful per-module chroot ("use chroot = yes") in
+ * clientserver.c. NOT set for the daemon-level "daemon chroot = /X"
+ * chroot: that confines path resolution to /X, but module paths
+ * /X/modA, /X/modB, etc. are not chroot boundaries, so the per-module
+ * symlink-race defenses (secure_relative_open() / do_*_at() in
+ * syscall.c, gated by `am_daemon && !am_chrooted`) must still fire
+ * even when the daemon is inside a daemon chroot. */
+int am_chrooted = 0;
 int connect_timeout = 0;
 int keep_partial = 0;
 int safe_symlinks = 0;
 int copy_unsafe_links = 0;
 int munge_symlinks = 0;
+int use_secure_symlinks = 0;
 int size_only = 0;
 int daemon_bwlimit = 0;
 int bwlimit = 0;
@@ -225,7 +235,7 @@ char *iconv_opt =
 
 struct chmod_mode_struct *chmod_modes = NULL;
 
-static const char *debug_verbosity[] = {
+static const char *const debug_verbosity[] = {
 	/*0*/ NULL,
 	/*1*/ NULL,
 	/*2*/ "BIND,CMD,CONNECT,DEL,DELTASUM,DUP,FILTER,FLIST,ICONV",
@@ -236,7 +246,7 @@ static const char *debug_verbosity[] = {
 
 #define MAX_VERBOSITY ((int)(sizeof debug_verbosity / sizeof debug_verbosity[0]) - 1)
 
-static const char *info_verbosity[1+MAX_VERBOSITY] = {
+static const char *const info_verbosity[1+MAX_VERBOSITY] = {
 	/*0*/ "NONREG",
 	/*1*/ "COPY,DEL,FLIST,MISC,NAME,STATS,SYMSAFE",
 	/*2*/ "BACKUP,MISC2,MOUNT,NAME2,REMOVE,SKIP",
@@ -474,7 +484,7 @@ static void parse_output_words(struct output_struct *words, short *levels, const
 static void output_item_help(struct output_struct *words)
 {
 	short *levels = words == info_words ? info_levels : debug_levels;
-	const char **verbosity = words == info_words ? info_verbosity : debug_verbosity;
+	const char *const*verbosity = words == info_words ? info_verbosity : debug_verbosity;
 	char buf[128], *opt, *fmt = "%-10s %s\n";
 	int j;
 
@@ -756,6 +766,8 @@ static struct poptOption long_options[] = {
   {"skip-compress",    0,  POPT_ARG_STRING, &skip_compress, 0, 0, 0 },
   {"compress-level",   0,  POPT_ARG_INT,    &do_compression_level, 0, 0, 0 },
   {"zl",               0,  POPT_ARG_INT,    &do_compression_level, 0, 0, 0 },
+  {"compress-threads", 0,  POPT_ARG_INT,    &do_compression_threads, 0, 0, 0 },
+  {"zt",               0,  POPT_ARG_INT,    &do_compression_threads, 0, 0, 0 },
   {0,                 'P', POPT_ARG_NONE,   0, 'P', 0, 0 },
   {"progress",         0,  POPT_ARG_VAL,    &do_progress, 1, 0, 0 },
   {"no-progress",      0,  POPT_ARG_VAL,    &do_progress, 0, 0, 0 },
@@ -844,7 +856,7 @@ static struct poptOption long_options[] = {
   {0,0,0,0, 0, 0, 0}
 };
 
-static struct poptOption long_daemon_options[] = {
+static const struct poptOption long_daemon_options[] = {
   /* longName, shortName, argInfo, argPtr, value, descrip, argDesc */
   {"address",          0,  POPT_ARG_STRING, &bind_address, 0, 0, 0 },
   {"bwlimit",          0,  POPT_ARG_INT,    &daemon_bwlimit, 0, 0, 0 },
@@ -1156,7 +1168,7 @@ static time_t parse_time(const char *arg)
 {
 	const char *cp;
 	time_t val, now = time(NULL);
-	struct tm t, *today = localtime(&now);
+	struct tm t, tmp, *today = localtime_r(&now, &tmp);
 	int in_date, old_mday, n;
 
 	memset(&t, 0, sizeof t);
@@ -1369,6 +1381,10 @@ int parse_arguments(int *argc_p, const char ***argv_p)
 	/* TODO: Call poptReadDefaultConfig; handle errors. */
 
 	pc = poptGetContext(RSYNC_NAME, argc, argv, long_options, 0);
+	if (pc == NULL) {
+		strlcpy(err_buf, "poptGetContext returned NULL\n", sizeof err_buf);
+		return 0;
+	}
 	if (!am_server) {
 		poptReadDefaultConfig(pc, 0);
 		popt_unalias(pc, "--daemon");
@@ -2006,6 +2022,8 @@ int parse_arguments(int *argc_p, const char ***argv_p)
 			create_refuse_error(refused_compress);
 			goto cleanup;
 		}
+		if (do_compression_threads < 0)
+			do_compression_threads = 0;
 	}
 
 #ifdef HAVE_SETVBUF

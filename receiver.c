@@ -70,6 +70,7 @@ extern int fuzzy_basis;
 
 extern struct name_num_item *xfer_sum_nni;
 extern int xfer_sum_len;
+extern int use_secure_symlinks;
 
 static struct bitbag *delayed_bits = NULL;
 static int phase = 0, redoing = 0;
@@ -214,7 +215,12 @@ int open_tmpfile(char *fnametmp, const char *fname, struct file_struct *file)
 	 * access to ensure that there is no race condition.  They will be
 	 * correctly updated after the right owner and group info is set.
 	 * (Thanks to snabb@epipe.fi for pointing this out.) */
-	fd = do_mkstemp(fnametmp, (file->mode|added_perms) & INITACCESSPERMS);
+	/* When use_secure_symlinks is on (non-chroot daemon with munge_symlinks),
+	 * use secure_mkstemp to prevent symlink race attacks on parent directories. */
+	if (use_secure_symlinks)
+		fd = secure_mkstemp(fnametmp, (file->mode|added_perms) & INITACCESSPERMS);
+	else
+		fd = do_mkstemp(fnametmp, (file->mode|added_perms) & INITACCESSPERMS);
 
 #if 0
 	/* In most cases parent directories will already exist because their
@@ -312,7 +318,12 @@ static int receive_data(int f_in, char *fname_r, int fd_r, OFF_T size_r,
 		}
 	}
 
-	while ((i = recv_token(f_in, &data)) != 0) {
+	while (1) {
+		data = NULL;
+		i = recv_token(f_in, &data);
+		if (i == 0)
+			break;
+
 		if (INFO_GTE(PROGRESS, 1))
 			show_progress(offset, total_size);
 
@@ -320,6 +331,10 @@ static int receive_data(int f_in, char *fname_r, int fd_r, OFF_T size_r,
 			maybe_send_keepalive(time(NULL), MSK_ALLOW_FLUSH | MSK_ACTIVE_RECEIVER);
 
 		if (i > 0) {
+			if (!data) {
+				rprintf(FERROR, "Invalid literal token with no data [%s]\n", who_am_i());
+				exit_cleanup(RERR_PROTOCOL);
+			}
 			if (DEBUG_GTE(DELTASUM, 3)) {
 				rprintf(FINFO,"data recv %d at %s\n",
 					i, big_num(offset));
@@ -337,6 +352,11 @@ static int receive_data(int f_in, char *fname_r, int fd_r, OFF_T size_r,
 		}
 
 		i = -(i+1);
+		if (i < 0 || i >= sum.count) {
+			rprintf(FERROR, "Invalid block index %d (count=%ld) [%s]\n",
+				i, (long)sum.count, who_am_i());
+			exit_cleanup(RERR_PROTOCOL);
+		}
 		offset2 = i * (OFF_T)sum.blength;
 		len = sum.blength;
 		if (i == (int)sum.count-1 && sum.remainder != 0)
@@ -436,7 +456,7 @@ static void handle_delayed_updates(char *local_name)
 			}
 			/* We don't use robust_rename() here because the
 			 * partial-dir must be on the same drive. */
-			if (do_rename(partialptr, fname) < 0) {
+			if (do_rename_at(partialptr, fname) < 0) {
 				rsyserr(FERROR_XFER, errno,
 					"rename failed for %s (from %s)",
 					full_fname(fname), partialptr);
@@ -452,7 +472,10 @@ static void handle_delayed_updates(char *local_name)
 static void no_batched_update(int ndx, BOOL is_redo)
 {
 	struct file_list *flist = flist_for_ndx(ndx, "no_batched_update");
-	struct file_struct *file = flist->files[ndx - flist->ndx_start];
+	struct file_struct *file;
+	if (ndx < flist->ndx_start)
+		exit_cleanup(RERR_PROTOCOL);
+	file = flist->files[ndx - flist->ndx_start];
 
 	rprintf(FERROR_XFER, "(No batched update for%s \"%s\")\n",
 		is_redo ? " resend of" : "", f_name(file, NULL));
@@ -589,6 +612,8 @@ int recv_files(int f_in, int f_out, char *local_name)
 
 		if (ndx - cur_flist->ndx_start >= 0)
 			file = cur_flist->files[ndx - cur_flist->ndx_start];
+		else if (cur_flist->parent_ndx < 0)
+			exit_cleanup(RERR_PROTOCOL);
 		else
 			file = dir_flist->files[cur_flist->parent_ndx];
 		fname = local_name ? local_name : f_name(file, fbuf);
@@ -854,11 +879,21 @@ int recv_files(int f_in, int f_out, char *local_name)
 		/* We now check to see if we are writing the file "inplace" */
 		if (inplace || one_inplace)  {
 			fnametmp = one_inplace ? partialptr : fname;
-			fd2 = do_open(fnametmp, O_WRONLY|O_CREAT, 0600);
+			/* When use_secure_symlinks is on (non-chroot daemon),
+			 * use secure open to prevent symlink race attacks where an
+			 * attacker could switch a directory to a symlink between
+			 * path validation and file open. */
+			if (use_secure_symlinks)
+				fd2 = secure_relative_open(NULL, fnametmp, O_WRONLY|O_CREAT, 0600);
+			else
+				fd2 = do_open(fnametmp, O_WRONLY|O_CREAT, 0600);
 #ifdef linux
 			if (fd2 == -1 && errno == EACCES) {
 				/* Maybe the error was due to protected_regular setting? */
-				fd2 = do_open(fname, O_WRONLY, 0600);
+				if (use_secure_symlinks)
+					fd2 = secure_relative_open(NULL, fname, O_WRONLY, 0600);
+				else
+					fd2 = do_open(fname, O_WRONLY, 0600);
 			}
 #endif
 			if (fd2 == -1) {
@@ -910,7 +945,7 @@ int recv_files(int f_in, int f_out, char *local_name)
 				recv_ok = -1;
 			else if (fnamecmp == partialptr) {
 				if (!one_inplace)
-					do_unlink(partialptr);
+					do_unlink_at(partialptr);
 				handle_partial_dir(partialptr, PDIR_DELETE);
 			}
 		} else if (keep_partial && partialptr && (!one_inplace || delay_updates)) {
@@ -919,7 +954,7 @@ int recv_files(int f_in, int f_out, char *local_name)
 					"Unable to create partial-dir for %s -- discarding %s.\n",
 					local_name ? local_name : f_name(file, NULL),
 					recv_ok ? "completed file" : "partial file");
-				do_unlink(fnametmp);
+				do_unlink_at(fnametmp);
 				recv_ok = -1;
 			} else if (!finish_transfer(partialptr, fnametmp, fnamecmp, NULL,
 						    file, recv_ok, !partial_dir))
@@ -930,7 +965,7 @@ int recv_files(int f_in, int f_out, char *local_name)
 			} else
 				partialptr = NULL;
 		} else if (!one_inplace)
-			do_unlink(fnametmp);
+			do_unlink_at(fnametmp);
 
 		cleanup_disable();
 

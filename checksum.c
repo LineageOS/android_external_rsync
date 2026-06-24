@@ -176,7 +176,7 @@ void parse_checksum_choice(int final_call)
 	if (valid_checksums.negotiated_nni)
 		xfer_sum_nni = file_sum_nni = valid_checksums.negotiated_nni;
 	else {
-		char *cp = checksum_choice ? strchr(checksum_choice, ',') : NULL;
+		const char *cp = checksum_choice ? strchr(checksum_choice, ',') : NULL;
 		if (cp) {
 			xfer_sum_nni = parse_csum_name(checksum_choice, cp - checksum_choice);
 			file_sum_nni = parse_csum_name(cp+1, -1);
@@ -366,9 +366,8 @@ void get_checksum2(char *buf, int32 len, char *sum)
 
 		mdfour_begin(&m);
 
-		if (len > len1) {
-			if (buf1)
-				free(buf1);
+		if (len > len1 || !buf1) {
+			free(buf1);
 			buf1 = new_array(char, len+4);
 			len1 = len;
 		}

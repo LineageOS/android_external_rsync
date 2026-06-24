@@ -49,7 +49,7 @@ OBJS2=options.o io.o compat.o hlink.o token.o uidlist.o socket.o hashtable.o \
 	usage.o fileio.o batch.o clientname.o chmod.o acls.o xattrs.o
 OBJS3=progress.o pipe.o @MD5_ASM@ @ROLL_SIMD@ @ROLL_ASM@
 DAEMON_OBJ = params.o loadparm.o clientserver.o access.o connection.o authenticate.o
-popt_OBJS=popt/findme.o  popt/popt.o  popt/poptconfig.o \
+popt_OBJS= popt/popt.o  popt/poptconfig.o \
 	popt/popthelp.o popt/poptparse.o popt/poptint.o
 OBJS=$(OBJS1) $(OBJS2) $(OBJS3) $(DAEMON_OBJ) $(LIBOBJ) @BUILD_ZLIB@ @BUILD_POPT@
 
@@ -57,12 +57,13 @@ TLS_OBJ = tls.o syscall.o util2.o t_stub.o lib/compat.o lib/snprintf.o lib/perms
 
 # Programs we must have to run the test cases
 CHECK_PROGS = rsync$(EXEEXT) tls$(EXEEXT) getgroups$(EXEEXT) getfsdev$(EXEEXT) \
-	testrun$(EXEEXT) trimslash$(EXEEXT) t_unsafe$(EXEEXT) wildtest$(EXEEXT)
+	testrun$(EXEEXT) trimslash$(EXEEXT) t_unsafe$(EXEEXT) t_chmod_secure$(EXEEXT) \
+	t_secure_relpath$(EXEEXT) wildtest$(EXEEXT) simdtest$(EXEEXT)
 
 CHECK_SYMLINKS = testsuite/chown-fake.test testsuite/devices-fake.test testsuite/xattrs-hlink.test
 
 # Objects for CHECK_PROGS to clean
-CHECK_OBJS=tls.o testrun.o getgroups.o getfsdev.o t_stub.o t_unsafe.o trimslash.o wildtest.o
+CHECK_OBJS=tls.o testrun.o getgroups.o getfsdev.o t_stub.o t_unsafe.o t_chmod_secure.o t_secure_relpath.o trimslash.o wildtest.o
 
 # note that the -I. is needed to handle config.h when using VPATH
 .c.o:
@@ -177,6 +178,14 @@ trimslash$(EXEEXT): $(TRIMSLASH_OBJ)
 T_UNSAFE_OBJ = t_unsafe.o syscall.o util1.o util2.o t_stub.o lib/compat.o lib/snprintf.o lib/wildmatch.o
 t_unsafe$(EXEEXT): $(T_UNSAFE_OBJ)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(T_UNSAFE_OBJ) $(LIBS)
+
+T_CHMOD_SECURE_OBJ = t_chmod_secure.o syscall.o util1.o util2.o t_stub.o lib/compat.o lib/snprintf.o lib/wildmatch.o lib/permstring.o
+t_chmod_secure$(EXEEXT): $(T_CHMOD_SECURE_OBJ)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(T_CHMOD_SECURE_OBJ) $(LIBS)
+
+T_SECURE_RELPATH_OBJ = t_secure_relpath.o syscall.o util1.o util2.o t_stub.o lib/compat.o lib/snprintf.o lib/wildmatch.o lib/permstring.o
+t_secure_relpath$(EXEEXT): $(T_SECURE_RELPATH_OBJ)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(T_SECURE_RELPATH_OBJ) $(LIBS)
 
 .PHONY: conf
 conf: configure.sh config.h.in
@@ -312,19 +321,27 @@ test: check
 
 .PHONY: check
 check: all $(CHECK_PROGS) $(CHECK_SYMLINKS)
-	rsync_bin=`pwd`/rsync$(EXEEXT) $(srcdir)/runtests.sh
+	$(srcdir)/runtests.py --rsync-bin=`pwd`/rsync$(EXEEXT)
 
 .PHONY: check29
 check29: all $(CHECK_PROGS) $(CHECK_SYMLINKS)
-	rsync_bin=`pwd`/rsync$(EXEEXT) $(srcdir)/runtests.sh --protocol=29
+	$(srcdir)/runtests.py --rsync-bin=`pwd`/rsync$(EXEEXT) --protocol=29
 
 .PHONY: check30
 check30: all $(CHECK_PROGS) $(CHECK_SYMLINKS)
-	rsync_bin=`pwd`/rsync$(EXEEXT) $(srcdir)/runtests.sh --protocol=30
+	$(srcdir)/runtests.py --rsync-bin=`pwd`/rsync$(EXEEXT) --protocol=30
 
 wildtest.o: wildtest.c t_stub.o lib/wildmatch.c rsync.h config.h
 wildtest$(EXEEXT): wildtest.o lib/compat.o lib/snprintf.o @BUILD_POPT@
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ wildtest.o lib/compat.o lib/snprintf.o @BUILD_POPT@ $(LIBS)
+
+simdtest$(EXEEXT): simd-checksum-x86_64.cpp $(HEADERS)
+	@if test x"@ROLL_SIMD@" != x; then \
+	    $(CXX) -I. $(CXXFLAGS) $(CPPFLAGS) $(LDFLAGS) -DTEST_SIMD_CHECKSUM1 \
+	        -o $@ $(srcdir)/simd-checksum-x86_64.cpp @ROLL_ASM@ $(LIBS); \
+	else \
+	    touch $@; \
+	fi
 
 testsuite/chown-fake.test:
 	ln -s chown.test $(srcdir)/testsuite/chown-fake.test
@@ -341,7 +358,7 @@ testsuite/xattrs-hlink.test:
 
 .PHONY: installcheck
 installcheck: $(CHECK_PROGS) $(CHECK_SYMLINKS)
-	POSIXLY_CORRECT=1 TOOLDIR=`pwd` rsync_bin="$(bindir)/rsync$(EXEEXT)" srcdir="$(srcdir)" $(srcdir)/runtests.sh
+	$(srcdir)/runtests.py --rsync-bin="$(bindir)/rsync$(EXEEXT)" --srcdir="$(srcdir)" --tooldir=`pwd`
 
 # TODO: Add 'dist' target; need to know which files will be included
 
