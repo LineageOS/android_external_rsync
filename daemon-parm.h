@@ -78,13 +78,13 @@ typedef struct {
 	BOOL reverse_lookup;
 	BOOL strict_modes;
 	BOOL transfer_logging;
-	BOOL use_chroot;
 	BOOL write_only;
 
 /********** BOOL3 **********/
 	BOOL munge_symlinks;
 	BOOL numeric_ids;
 	BOOL open_noatime;
+	BOOL use_chroot;
 
 /********** EXP **********/
 	BOOL auth_users_EXP;
@@ -202,13 +202,13 @@ static const all_vars Defaults = {
 	True, /* reverse_lookup */
 	True, /* strict_modes */
 	False, /* transfer_logging */
-	True, /* use_chroot */
 	False, /* write_only */
 
 /********** BOOL3 **********/
 	Unset, /* munge_symlinks */
 	Unset, /* numeric_ids */
 	Unset, /* open_noatime */
+	Unset, /* use_chroot */
 
 /********** EXP **********/
 	False, /* auth_users_EXP */
@@ -245,7 +245,7 @@ static const all_vars Defaults = {
 
 static all_vars Vars;
 
-static struct parm_struct parm_table[] = {
+static const struct parm_struct parm_table[] = {
  {"address", P_STRING, P_GLOBAL, &Vars.g.bind_address, NULL, 0},
  {"daemon chroot", P_STRING, P_GLOBAL, &Vars.g.daemon_chroot, NULL, 0},
  {"daemon gid", P_STRING, P_GLOBAL, &Vars.g.daemon_gid, NULL, 0},
@@ -304,12 +304,12 @@ static struct parm_struct parm_table[] = {
  {"reverse lookup", P_BOOL, P_LOCAL, &Vars.l.reverse_lookup, NULL, 0},
  {"strict modes", P_BOOL, P_LOCAL, &Vars.l.strict_modes, NULL, 0},
  {"transfer logging", P_BOOL, P_LOCAL, &Vars.l.transfer_logging, NULL, 0},
- {"use chroot", P_BOOL, P_LOCAL, &Vars.l.use_chroot, NULL, 0},
  {"write only", P_BOOL, P_LOCAL, &Vars.l.write_only, NULL, 0},
 
  {"munge symlinks", P_BOOL3, P_LOCAL, &Vars.l.munge_symlinks, NULL, 0},
  {"numeric ids", P_BOOL3, P_LOCAL, &Vars.l.numeric_ids, NULL, 0},
  {"open noatime", P_BOOL3, P_LOCAL, &Vars.l.open_noatime, NULL, 0},
+ {"use chroot", P_BOOL3, P_LOCAL, &Vars.l.use_chroot, NULL, 0},
 
  {NULL, P_BOOL, P_NONE, NULL, NULL, 0}
 };
@@ -372,10 +372,10 @@ FN_LOCAL_BOOL(lp_read_only, read_only)
 FN_LOCAL_BOOL(lp_reverse_lookup, reverse_lookup)
 FN_LOCAL_BOOL(lp_strict_modes, strict_modes)
 FN_LOCAL_BOOL(lp_transfer_logging, transfer_logging)
-FN_LOCAL_BOOL(lp_use_chroot, use_chroot)
 FN_LOCAL_BOOL(lp_write_only, write_only)
 
 FN_LOCAL_BOOL(lp_munge_symlinks, munge_symlinks)
 FN_LOCAL_BOOL(lp_numeric_ids, numeric_ids)
 FN_LOCAL_BOOL(lp_open_noatime, open_noatime)
+FN_LOCAL_BOOL(lp_use_chroot, use_chroot)
 
