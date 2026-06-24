@@ -16,6 +16,24 @@
       "message": "needs luks magic",
       "revId": "8c9dfc3be9ff7eb0a49f9c75d99b28724a5080c8",
       "serverId": "1ec6b3db-b2c1-4fa4-84a2-4c7efe89ba71"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "a3ea396a_2ceb3336",
+        "filename": "/PATCHSET_LEVEL",
+        "patchSetId": 2
+      },
+      "lineNbr": 0,
+      "author": {
+        "id": 16185
+      },
+      "writtenOn": "2026-06-24T21:03:31Z",
+      "side": 1,
+      "message": "opening",
+      "parentUuid": "7d7aecbd_3bd373fe",
+      "revId": "8c9dfc3be9ff7eb0a49f9c75d99b28724a5080c8",
+      "serverId": "1ec6b3db-b2c1-4fa4-84a2-4c7efe89ba71"
     }
   ]
 }
