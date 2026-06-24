@@ -76,7 +76,6 @@ cc_binary {
         "lib/sysacls.c",
         "lib/sysxattrs.c",
         "lib/wildmatch.c",
-        "popt/findme.c",
         "popt/lookup3.c",
         "popt/popt.c",
         "popt/poptconfig.c",

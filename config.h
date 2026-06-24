@@ -214,9 +214,6 @@
 /* Define to 1 if you have the 'acl' library (-lacl). */
 /* #undef HAVE_LIBACL */
 
-/* Define to 1 if you have the 'attr' library (-lattr). */
-/* #undef HAVE_LIBATTR */
-
 /* Define to 1 if you have the <libcharset.h> header file. */
 /* #undef HAVE_LIBCHARSET_H */
 
